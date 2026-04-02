@@ -3,7 +3,7 @@ CRUD (Create, Read, Update, Delete) operations for Jarvis AI Assistant.
 """
 
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 from backend import models, schemas
 
 
@@ -39,7 +39,7 @@ def update_conversation(db: Session, conversation_id: int, data: schemas.Convers
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(obj, key, value)
-    obj.updated_at = datetime.utcnow()
+    obj.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(obj)
     return obj
@@ -107,7 +107,7 @@ def update_note(db: Session, note_id: int, data: schemas.NoteUpdate):
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(obj, key, value)
-    obj.updated_at = datetime.utcnow()
+    obj.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(obj)
     return obj
@@ -119,3 +119,71 @@ def delete_note(db: Session, note_id: int):
         db.delete(obj)
         db.commit()
     return obj
+
+
+# ─── File Document CRUD ───────────────────────────────────────────────────────
+
+def create_file_document(db: Session, file_id: str, filename: str, file_type: str, chunk_count: int):
+    obj = models.FileDocument(
+        file_id=file_id,
+        filename=filename,
+        file_type=file_type,
+        chunk_count=chunk_count,
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def get_file_document(db: Session, file_id: str):
+    return db.query(models.FileDocument).filter(models.FileDocument.file_id == file_id).first()
+
+
+def get_file_documents(db: Session, skip: int = 0, limit: int = 50):
+    return (
+        db.query(models.FileDocument)
+        .order_by(models.FileDocument.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def delete_file_document(db: Session, file_id: str) -> bool:
+    """Delete the document record and all its associated chunks."""
+    # Delete chunks first
+    db.query(models.FileChunk).filter(models.FileChunk.file_id == file_id).delete()
+    # Delete document record
+    deleted = db.query(models.FileDocument).filter(models.FileDocument.file_id == file_id).delete()
+    db.commit()
+    return deleted > 0
+
+
+# ─── File Chunk CRUD ──────────────────────────────────────────────────────────
+
+def create_file_chunks(db: Session, file_id: str, chunks: list[tuple[int, str, bytes]]) -> None:
+    """
+    Bulk-insert file chunks.
+    chunks: list of (chunk_index, content, embedding_bytes)
+    """
+    objects = [
+        models.FileChunk(
+            file_id=file_id,
+            chunk_index=idx,
+            content=text,
+            embedding=emb_bytes,
+        )
+        for idx, text, emb_bytes in chunks
+    ]
+    db.bulk_save_objects(objects)
+    db.commit()
+
+
+def get_file_chunks(db: Session, file_id: str) -> list[models.FileChunk]:
+    return (
+        db.query(models.FileChunk)
+        .filter(models.FileChunk.file_id == file_id)
+        .order_by(models.FileChunk.chunk_index.asc())
+        .all()
+    )
