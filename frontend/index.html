@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=20260402-themefix" />
 </head>
 <body>
   <div class="bg-orbs" aria-hidden="true">
@@ -96,7 +96,7 @@
 
         <div class="input-area">
           <!-- Hidden file input -->
-          <input type="file" id="fileInput" accept=".pdf,.txt" style="display:none" aria-label="Upload document" />
+          <input type="file" id="fileInput" class="visually-hidden" accept=".pdf,.txt" aria-label="Upload document" />
           <div class="input-box">
             <!-- Upload button -->
             <button class="upload-btn" id="uploadBtn" aria-label="Attach document" title="Upload PDF or TXT">
@@ -116,7 +116,7 @@
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
             </button>
           </div>
-          <p class="input-hint">Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>📎</kbd> to analyze a document</p>
+          <p class="input-hint" id="inputHint">Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>📎</kbd> to analyze a document</p>
         </div>
       </section>
 
@@ -163,6 +163,6 @@
   <div class="toast-container" id="toastContainer" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=20260402-themefix"></script>
 </body>
 </html>

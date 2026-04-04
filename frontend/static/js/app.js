@@ -51,9 +51,12 @@ const state = {
   currentConversationId: null,
   isLoading:             false,
   editingNoteId:         null,
-  /** Active file: { id: string, name: string, chunks: number } | null */
+  /** Active file: { id: string, name: string, meta?: string } | null */
   activeFile:            null,
 };
+
+const DEFAULT_INPUT_HINT =
+  'Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>📎</kbd> to analyze a document';
 
 // ─── DOM Helpers ───────────────────────────────────────────────────────────────
 
@@ -75,6 +78,7 @@ const els = {
   fileModeChip:     $('fileModeChip'),
   fileModeChipName: $('fileModeChipName'),
   chatTitle:        $('chatTitle'),
+  inputHint:        $('inputHint'),
   statusText:       $('statusText'),
   statusDot:        $('statusDot'),
   newChatBtn:       $('newChatBtn'),
@@ -143,18 +147,24 @@ els.fileInput.addEventListener('change', async () => {
     return;
   }
 
-  // Show uploading state
   els.uploadBtn.classList.add('uploading');
   els.uploadBtn.title = 'Uploading…';
-  showToast(`Uploading "${file.name}"…`, '');
+  updateInputHint('Analyzing document...');
+  showToast('Analyzing document...', '');
 
   try {
     const fd = new FormData();
     fd.append('file', file);
     const data = await API.upload('/upload', fd);
-    setActiveFile({ id: data.file_id, name: data.filename, chunks: data.chunk_count });
-    showToast(`✅ "${data.filename}" ready — ${data.chunk_count} chunks indexed.`, 'success');
+    setActiveFile({
+      id: data.file_id,
+      name: data.filename,
+      meta: `${data.chunk_count} chunks indexed`,
+    });
+    startDocumentChat(data.filename);
+    showToast(`"${data.filename}" is ready for document chat.`, 'success');
   } catch (err) {
+    updateInputHint(state.activeFile ? 'Document mode active.' : DEFAULT_INPUT_HINT);
     showToast(err.message || 'Upload failed.', 'error');
   } finally {
     els.uploadBtn.classList.remove('uploading');
@@ -165,20 +175,16 @@ els.fileInput.addEventListener('change', async () => {
 function setActiveFile(file) {
   state.activeFile = file;
 
-  // Update file badge bar
   els.fileBadgeName.textContent = file.name;
-  els.fileBadgeMeta.textContent = `${file.chunks} chunks`;
+  els.fileBadgeMeta.textContent = file.meta || 'Document ready';
   els.fileBadgeBar.classList.remove('hidden');
 
-  // Update header chip
   els.fileModeChipName.textContent = file.name;
   els.fileModeChip.classList.remove('hidden');
 
-  // Update input placeholder
   els.messageInput.placeholder = `Ask about "${file.name}"…`;
-
-  // Update send button title
   els.uploadBtn.classList.add('active');
+  updateInputHint('Document mode active. Answers will use the uploaded file.');
 }
 
 function clearActiveFile() {
@@ -188,12 +194,25 @@ function clearActiveFile() {
   els.fileModeChip.classList.add('hidden');
   els.messageInput.placeholder = 'Message Jarvis...';
   els.uploadBtn.classList.remove('active');
+  updateInputHint(DEFAULT_INPUT_HINT);
 }
 
 els.fileBadgeDismiss.addEventListener('click', () => {
   clearActiveFile();
   showToast('Document removed. Back to normal chat.', '');
 });
+
+function startDocumentChat(filename) {
+  state.currentConversationId = null;
+  els.chatTitle.textContent = filename;
+  delete els.chatTitle.dataset.set;
+  els.messagesArea.innerHTML = '';
+  hideSplash();
+  els.messagesArea.appendChild(
+    createMessageEl('assistant', `Document ready. Ask a question about "${filename}".`)
+  );
+  scrollBottom();
+}
 
 // ─── Speech Recognition ────────────────────────────────────────────────────────
 
@@ -211,14 +230,14 @@ function startListening() {
 
   recognition.onstart = () => {
     els.messageInput.placeholder = 'Listening…';
-    if (els.micBtn) els.micBtn.style.color = 'var(--error)';
+    if (els.micBtn) els.micBtn.classList.add('is-listening');
   };
   recognition.onspeechend = () => recognition.stop();
   recognition.onend = () => {
     els.messageInput.placeholder = state.activeFile
       ? `Ask about "${state.activeFile.name}"…`
       : 'Message Jarvis...';
-    if (els.micBtn) els.micBtn.style.color = 'var(--text-dim)';
+    if (els.micBtn) els.micBtn.classList.remove('is-listening');
   };
   recognition.onresult = (event) => {
     const transcript = event.results[0][0].transcript.trim();
@@ -282,7 +301,7 @@ function createMessageEl(role, content) {
   avatarDiv.textContent = isUser ? '👤' : '⚡';
 
   const wrapperDiv = document.createElement('div');
-  wrapperDiv.style.cssText = 'display:flex; flex-direction:column; gap:4px; max-width:85%;';
+  wrapperDiv.className = 'message-stack';
   wrapperDiv.appendChild(bubbleDiv);
 
   if (!isUser) {
@@ -339,6 +358,7 @@ async function sendMessage() {
   els.messagesArea.appendChild(userMsgEl);
   scrollBottom();
   showTyping();
+  updateInputHint(state.activeFile ? 'Searching document...' : DEFAULT_INPUT_HINT);
 
   try {
     let data;
@@ -376,6 +396,7 @@ async function sendMessage() {
   } finally {
     state.isLoading = false;
     els.sendBtn.disabled = false;
+    updateInputHint(state.activeFile ? 'Document mode active. Answers will use the uploaded file.' : DEFAULT_INPUT_HINT);
     els.messageInput.focus();
   }
 }
@@ -537,6 +558,15 @@ async function loadConversation(id) {
     state.currentConversationId = parseInt(id);
     els.chatTitle.textContent = convo.title;
     els.chatTitle.dataset.set = '1';
+    if (convo.document_file_id) {
+      setActiveFile({
+        id: convo.document_file_id,
+        name: convo.document_filename || 'Document',
+        meta: 'Document chat',
+      });
+    } else {
+      clearActiveFile();
+    }
     els.messagesArea.innerHTML = '';
     if (messages.length === 0) {
       els.messagesArea.appendChild(els.welcomeSplash);
@@ -588,18 +618,24 @@ function showToast(msg, type = '') {
   }, 3500);
 }
 
+function updateInputHint(content) {
+  if (!els.inputHint) return;
+  els.inputHint.innerHTML = content;
+}
+
 // ─── Health Check ──────────────────────────────────────────────────────────────
 
 async function checkHealth() {
   try {
     const data = await API.get('/health');
     const aiOk = data?.ai_service?.status === 'ok';
-    els.statusDot.style.background = aiOk ? 'var(--success)' : 'var(--error)';
-    els.statusDot.style.boxShadow  = `0 0 6px ${aiOk ? 'var(--success)' : 'var(--error)'}`;
+    els.statusDot.classList.remove('status-offline');
+    els.statusDot.classList.toggle('status-online', aiOk);
+    els.statusDot.classList.toggle('status-ai-error', !aiOk);
     els.statusText.textContent = aiOk ? 'Online' : 'AI Error';
   } catch {
-    els.statusDot.style.background = 'var(--error)';
-    els.statusDot.style.boxShadow  = '0 0 6px var(--error)';
+    els.statusDot.classList.remove('status-online', 'status-ai-error');
+    els.statusDot.classList.add('status-offline');
     els.statusText.textContent = 'Offline';
   }
 }

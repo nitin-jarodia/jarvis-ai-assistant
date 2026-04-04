@@ -11,11 +11,13 @@ class Conversation(Base):
     """Stores chat conversation sessions."""
     __tablename__ = "conversations"
 
-    id         = Column(Integer, primary_key=True, index=True)
-    title      = Column(String(255), nullable=False, default="New Conversation")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    is_active  = Column(Boolean, default=True)
+    id                = Column(Integer, primary_key=True, index=True)
+    title             = Column(String(255), nullable=False, default="New Conversation")
+    document_file_id  = Column(String(36), nullable=True, index=True)
+    document_filename = Column(String(255), nullable=True)
+    created_at        = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at        = Column(DateTime(timezone=True), onupdate=func.now())
+    is_active         = Column(Boolean, default=True)
 
 
 class Message(Base):

@@ -11,16 +11,22 @@ from typing import Optional
 
 class ConversationCreate(BaseModel):
     title: str = Field(default="New Conversation", max_length=255)
+    document_file_id: Optional[str] = None
+    document_filename: Optional[str] = Field(default=None, max_length=255)
 
 
 class ConversationUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=255)
+    document_file_id: Optional[str] = None
+    document_filename: Optional[str] = Field(default=None, max_length=255)
     is_active: Optional[bool] = None
 
 
 class ConversationOut(BaseModel):
     id: int
     title: str
+    document_file_id: Optional[str]
+    document_filename: Optional[str]
     created_at: datetime
     updated_at: Optional[datetime]
     is_active: bool

@@ -25,7 +25,11 @@ def get_conversation(db: Session, conversation_id: int):
 
 
 def create_conversation(db: Session, data: schemas.ConversationCreate):
-    obj = models.Conversation(title=data.title)
+    obj = models.Conversation(
+        title=data.title,
+        document_file_id=data.document_file_id,
+        document_filename=data.document_filename,
+    )
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -172,7 +176,7 @@ def create_file_chunks(db: Session, file_id: str, chunks: list[tuple[int, str, b
             file_id=file_id,
             chunk_index=idx,
             content=text,
-            embedding=emb_bytes,
+            embedding=emb_bytes or b"",
         )
         for idx, text, emb_bytes in chunks
     ]

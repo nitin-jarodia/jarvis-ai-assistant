@@ -50,7 +50,8 @@ uvicorn backend.main:app --reload
 
 ### 3. Open the app
 
-Visit [http://127.0.0.1:8000](http://127.0.0.1:8000) in your browser.
+Visit [http://127.0.0.1:8000/app](http://127.0.0.1:8000/app) in your browser.
+The API root at [http://127.0.0.1:8000](http://127.0.0.1:8000) returns a lightweight status response.
 
 ### 4. API Docs
 
@@ -78,6 +79,7 @@ def generate_reply(message: str) -> str:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | `/` | Lightweight server status |
 | GET | `/api/health` | Health check |
 | POST | `/api/chat` | Send a message to Jarvis |
 | GET | `/api/conversations` | List conversations |

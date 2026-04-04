@@ -2,63 +2,82 @@
 File Service for Jarvis AI Assistant.
 
 Handles:
+  - Upload validation
   - Text extraction from PDF and TXT files
-  - Text chunking with overlap
-  - Sentence embedding via sentence-transformers (lazy singleton)
-  - FAISS vector index building and in-memory caching
-  - Semantic chunk retrieval for RAG
+  - Word-based chunking
+  - Lightweight relevance scoring for document chat
 """
 
 from __future__ import annotations
 
 import io
 import logging
-import struct
-from typing import TYPE_CHECKING
-
-import numpy as np
-
-if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+import re
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-CHUNK_SIZE    = 600    # characters (~150 tokens)
-CHUNK_OVERLAP = 100    # characters of overlap between chunks
-TOP_K_CHUNKS  = 4      # chunks sent to the LLM per query
-EMBED_MODEL   = "all-MiniLM-L6-v2"  # 80 MB, 384-dim, fast
-EMBED_DIM     = 384
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_EXTENSIONS = {"pdf", "txt"}
+ALLOWED_CONTENT_TYPES = {
+    "pdf": {"application/pdf", "application/x-pdf"},
+    "txt": {"text/plain", "application/octet-stream", ""},
+}
+TARGET_CHUNK_WORDS = 650
+CHUNK_OVERLAP_WORDS = 100
+MIN_CHUNK_WORDS = 80
+TOP_K_CHUNKS = 5
+MIN_RELEVANCE_SCORE = 1.2
+FALLBACK_CHUNK_COUNT = 2
 
-# ─── Lazy Singletons ──────────────────────────────────────────────────────────
-
-_embed_model = None   # sentence_transformers.SentenceTransformer
-
-def _get_embed_model():
-    """Lazy-load the sentence-transformer model once."""
-    global _embed_model
-    if _embed_model is None:
-        from sentence_transformers import SentenceTransformer  # noqa
-        logger.info("Loading embedding model '%s'…", EMBED_MODEL)
-        _embed_model = SentenceTransformer(EMBED_MODEL)
-        logger.info("Embedding model loaded.")
-    return _embed_model
-
-
-# ─── Index Cache ────────────────────────────────────────────────────────
-# Maps file_id → (np.ndarray matrix, list[chunk_text])
-
-_index_cache: dict[str, tuple[np.ndarray, list[str]]] = {}
-
-
-def evict_index(file_id: str) -> None:
-    """Remove a file's matrix index from memory."""
-    _index_cache.pop(file_id, None)
-    logger.debug("Evicted FAISS index for file_id=%s", file_id)
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from",
+    "how", "i", "in", "is", "it", "of", "on", "or", "that", "the", "this",
+    "to", "was", "were", "what", "when", "where", "which", "who", "why",
+    "with", "you", "your", "about", "into", "than", "them", "they", "their",
+    "tell", "me", "please", "can", "could", "would", "should",
+}
+SUMMARY_TERMS = {
+    "summary", "summarize", "overview", "main", "topic", "gist", "document",
+    "brief", "highlevel", "high", "level",
+}
+FOLLOW_UP_TERMS = {
+    "it", "this", "that", "those", "these", "they", "them", "he", "she",
+    "more", "further", "continue", "elaborate", "detail", "details",
+    "explain", "again", "also", "its",
+}
 
 
 # ─── Text Extraction ──────────────────────────────────────────────────────────
+
+def validate_upload(filename: str, content_type: str | None, content: bytes) -> str:
+    """Validate the uploaded file and return the normalized extension."""
+    if not filename:
+        raise ValueError("A file name is required.")
+
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise ValueError("Unsupported file type. Only PDF and TXT files are allowed.")
+
+    if not content:
+        raise ValueError("Uploaded file is empty.")
+
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise ValueError("File too large. Maximum size is 10 MB.")
+
+    normalized_content_type = (content_type or "").split(";")[0].strip().lower()
+    allowed_types = ALLOWED_CONTENT_TYPES.get(ext, set())
+    if normalized_content_type and normalized_content_type not in allowed_types:
+        logger.warning(
+            "Upload content-type mismatch for %s: %s",
+            filename,
+            normalized_content_type,
+        )
+
+    return ext
+
 
 def extract_text(file_content: bytes, filename: str) -> str:
     """Extract plain text from PDF or TXT file bytes."""
@@ -74,6 +93,11 @@ def extract_text(file_content: bytes, filename: str) -> str:
 
 def _extract_txt(content: bytes) -> str:
     try:
+        for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                return content.decode(encoding).strip()
+            except UnicodeDecodeError:
+                continue
         return content.decode("utf-8", errors="replace").strip()
     except Exception as e:
         raise ValueError(f"Failed to read TXT file: {e}") from e
@@ -81,13 +105,15 @@ def _extract_txt(content: bytes) -> str:
 
 def _extract_pdf(content: bytes) -> str:
     try:
-        from pypdf import PdfReader  # noqa
-        reader = PdfReader(io.BytesIO(content))
+        import pdfplumber  # noqa
+
         pages = []
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                pages.append(text.strip())
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for index, page in enumerate(pdf.pages, start=1):
+                text = page.extract_text() or ""
+                cleaned = text.strip()
+                if cleaned:
+                    pages.append(f"[Page {index}]\n{cleaned}")
         full_text = "\n\n".join(pages)
         if not full_text.strip():
             raise ValueError("PDF appears to have no extractable text (may be scanned).")
@@ -101,147 +127,143 @@ def _extract_pdf(content: bytes) -> str:
 # ─── Text Chunking ────────────────────────────────────────────────────────────
 
 def chunk_text(text: str) -> list[str]:
-    """
-    Split text into overlapping chunks.
-    Strategy: character-level sliding window with sentence-boundary preference.
-    """
-    text = _clean_text(text)
+    """Split text into overlapping chunks of roughly 500-800 words."""
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return []
+
+    words = cleaned.split()
+    if len(words) <= TARGET_CHUNK_WORDS:
+        return [cleaned]
+
     chunks: list[str] = []
     start = 0
-    length = len(text)
+    step = TARGET_CHUNK_WORDS - CHUNK_OVERLAP_WORDS
 
-    while start < length:
-        end = min(start + CHUNK_SIZE, length)
-
-        # Prefer to break at sentence/paragraph boundary within last 100 chars
-        if end < length:
-            boundary = _find_boundary(text, end, lookback=100)
-            if boundary:
-                end = boundary
-
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-
-        if end >= length:
+    while start < len(words):
+        end = min(start + TARGET_CHUNK_WORDS, len(words))
+        chunk_words = words[start:end]
+        if len(chunk_words) < MIN_CHUNK_WORDS and chunks:
+            chunks[-1] = f"{chunks[-1]}\n\n{' '.join(chunk_words)}".strip()
             break
-        start = end - CHUNK_OVERLAP  # overlap
+
+        chunks.append(" ".join(chunk_words).strip())
+        if end >= len(words):
+            break
+        start += step
 
     return chunks
 
 
 def _clean_text(text: str) -> str:
     """Normalize whitespace and remove junk characters."""
-    import re
-    # Collapse multiple blank lines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    # Normalize tabs and carriage returns
+    text = text.replace("\x00", " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
-    # Collapse multiple spaces (not newlines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ ]{2,}", " ", text)
+    text = re.sub(r"\n +", "\n", text)
     return text.strip()
-
-
-def _find_boundary(text: str, pos: int, lookback: int) -> int | None:
-    """Find the last sentence/paragraph boundary before pos."""
-    window = text[max(0, pos - lookback): pos]
-    for sep in ("\n\n", ".\n", ". ", "? ", "! ", "\n"):
-        idx = window.rfind(sep)
-        if idx != -1:
-            return pos - lookback + idx + len(sep)
-    return None
-
-
-# ─── Embeddings ───────────────────────────────────────────────────────────────
-
-def embed_texts(texts: list[str]) -> np.ndarray:
-    """
-    Embed a list of texts.
-    Returns float32 array of shape (N, EMBED_DIM), L2-normalized.
-    """
-    model = _get_embed_model()
-    vectors = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
-    return vectors.astype(np.float32)
-
-
-def embedding_to_bytes(vec: np.ndarray) -> bytes:
-    """Serialize a float32 embedding vector to bytes for SQLite storage."""
-    return vec.astype(np.float32).tobytes()
-
-
-def bytes_to_embedding(blob: bytes) -> np.ndarray:
-    """Deserialize bytes back to a float32 numpy vector."""
-    n = len(blob) // 4  # float32 = 4 bytes
-    return np.array(struct.unpack(f"{n}f", blob), dtype=np.float32)
-
-
-# ─── Search Index ─────────────────────────────────────────────────────────────
-
-def _load_index_from_db(file_id: str, db: "Session") -> tuple[np.ndarray, list[str]] | None:
-    """Load all chunks for a file_id from the DB and build the NumPy matrix."""
-    from backend import crud  # local import to avoid circular dependency
-
-    chunks = crud.get_file_chunks(db, file_id)
-    if not chunks:
-        return None
-
-    texts: list[str] = []
-    embeddings: list[np.ndarray] = []
-
-    for chunk in chunks:
-        texts.append(chunk.content)
-        embeddings.append(bytes_to_embedding(chunk.embedding))
-
-    matrix = np.stack(embeddings, axis=0).astype(np.float32)
-    return matrix, texts
 
 
 # ─── Retrieval ────────────────────────────────────────────────────────────────
 
-def retrieve_chunks(query: str, file_id: str, db: "Session", top_k: int = TOP_K_CHUNKS) -> list[str]:
-    """
-    Embed query, perform cosine similarity, return top-k most relevant text chunks.
-    Index matrix is loaded from DB on first call then cached in memory.
-    """
-    # Build or retrieve cached matrix
-    if file_id not in _index_cache:
-        logger.info("Building NumPy matrix index for file_id=%s…", file_id)
-        result = _load_index_from_db(file_id, db)
-        if result is None:
-            logger.warning("No chunks found in DB for file_id=%s", file_id)
-            return []
-        _index_cache[file_id] = result
-        logger.info("Matrix index cached for file_id=%s (%d chunks)", file_id, len(result[1]))
+def build_retrieval_query(query: str, history: list[dict[str, str]] | None = None) -> str:
+    """Expand short follow-up questions with recent user context."""
+    if not history:
+        return query
 
-    matrix, chunk_texts = _index_cache[file_id]
+    prior_user_messages = [
+        message["content"].strip()
+        for message in history
+        if message.get("role") == "user" and message.get("content")
+    ]
+    if not prior_user_messages:
+        return query
 
-    # Embed the query
-    q_vec = embed_texts([query])  # shape (1, EMBED_DIM)
-
-    # Search using NumPy dot product (since vectors are L2-normalized, dot product == cosine similarity)
-    # q_vec: (1, dim), matrix: (N, dim). Result: (1, N)
-    scores = np.dot(q_vec, matrix.T)[0]
-    
-    # Get top-k indices
-    k = min(top_k, len(chunk_texts))
-    # argpartition is faster than argsort for finding top k
-    if len(scores) > k:
-        indices = np.argpartition(scores, -k)[-k:]
-        # Sort these k indices by descending score
-        indices = indices[np.argsort(-scores[indices])]
-    else:
-        indices = np.argsort(-scores)
-
-    # Filter out low-confidence matches (score < 0.2 cosine similarity)
-    results: list[str] = []
-    for idx in indices:
-        score = scores[idx]
-        if score > 0.2:
-            results.append(chunk_texts[idx])
-
-    logger.debug(
-        "Retrieval for file_id=%s: %d/%d chunks selected (scores: %s)",
-        file_id, len(results), k,
-        [f"{scores[idx]:.3f}" for idx in indices[:len(results)]],
+    current_terms = _query_terms(query)
+    is_follow_up = (
+        len(current_terms) <= 4
+        or any(term in FOLLOW_UP_TERMS for term in _tokenize(query))
     )
-    return results
+    if not is_follow_up:
+        return query
+
+    previous_questions = prior_user_messages[-2:]
+    expanded_parts = previous_questions + [query]
+    return " ".join(part for part in expanded_parts if part).strip()
+
+
+def retrieve_chunks(query: str, chunks: list[str], top_k: int = TOP_K_CHUNKS) -> list[str]:
+    """Return the most relevant chunks for a query using lightweight scoring."""
+    if not chunks:
+        return []
+
+    query_terms = _query_terms(query)
+    raw_query_terms = _tokenize(query)
+
+    if not query_terms or any(term in SUMMARY_TERMS for term in raw_query_terms):
+        return chunks[: min(top_k, len(chunks))]
+
+    scored_chunks: list[tuple[float, int, str]] = []
+    for index, chunk in enumerate(chunks):
+        score = _score_chunk(query, query_terms, chunk)
+        scored_chunks.append((score, index, chunk))
+
+    if not scored_chunks:
+        return chunks[: min(FALLBACK_CHUNK_COUNT, len(chunks))]
+
+    scored_chunks.sort(key=lambda item: (-item[0], item[1]))
+    strong_matches = [item for item in scored_chunks if item[0] >= MIN_RELEVANCE_SCORE]
+    if strong_matches:
+        return [chunk for _, _, chunk in strong_matches[:top_k]]
+
+    positive_matches = [item for item in scored_chunks if item[0] > 0]
+    if positive_matches:
+        return [chunk for _, _, chunk in positive_matches[: min(top_k, len(positive_matches))]]
+
+    return chunks[: min(FALLBACK_CHUNK_COUNT, len(chunks))]
+
+
+def format_chunks_for_prompt(chunks: list[str]) -> str:
+    """Format retrieved chunks into a compact prompt block."""
+    sections = [f"[Chunk {index + 1}]\n{chunk}" for index, chunk in enumerate(chunks)]
+    return "\n\n".join(sections)
+
+
+def _score_chunk(query: str, query_terms: list[str], chunk: str) -> float:
+    chunk_terms = _tokenize(chunk)
+    if not chunk_terms:
+        return 0.0
+
+    chunk_counter = Counter(chunk_terms)
+    overlap = [term for term in query_terms if term in chunk_counter]
+    if not overlap:
+        return 0.0
+
+    coverage_score = len(set(overlap)) / max(len(set(query_terms)), 1)
+    frequency_score = sum(min(chunk_counter[term], 3) for term in overlap) / len(query_terms)
+
+    normalized_query = _normalize_for_match(query)
+    normalized_chunk = _normalize_for_match(chunk)
+    phrase_bonus = 1.5 if normalized_query and normalized_query in normalized_chunk else 0.0
+
+    ordered_bonus = 0.0
+    if len(query_terms) >= 2:
+        joined_terms = " ".join(query_terms[:4])
+        if joined_terms and joined_terms in normalized_chunk:
+            ordered_bonus = 0.75
+
+    return (coverage_score * 3.0) + frequency_score + phrase_bonus + ordered_bonus
+
+
+def _query_terms(query: str) -> list[str]:
+    tokens = _tokenize(query)
+    return [token for token in tokens if token not in STOPWORDS]
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _normalize_for_match(text: str) -> str:
+    return " ".join(_tokenize(text))

@@ -18,18 +18,14 @@ if %ERRORLEVEL% NEQ 0 (
 echo [OK] Dependencies verified.
 echo.
 
-echo [2/3] Checking Ollama AI Engine...
-ollama --version >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [!] Ollama is not installed or not running!
-    echo     Please install Ollama from https://ollama.com
+echo [2/3] Checking environment...
+if not exist .env (
+    echo [!] .env file not found.
+    echo     Create it from .env.example and add your GROQ_API_KEY.
     pause
     exit /b
 )
-echo [OK] Ollama is installed.
-echo [~] Ensuring 'tinyllama' model is downloaded (this may take a moment if it's your first time)...
-ollama pull tinyllama >nul 2>&1
-echo [OK] AI Model ready.
+echo [OK] Environment file detected.
 echo.
 
 echo [3/3] Starting Jarvis API Server...
@@ -47,6 +43,6 @@ start "Jarvis API Backend" cmd /c "python -m uvicorn backend.main:app --host 127
 timeout /t 3 /nobreak >nul
 
 :: Open the frontend UI in the default web browser
-start http://127.0.0.1:8000
+start http://127.0.0.1:8000/app
 
 exit

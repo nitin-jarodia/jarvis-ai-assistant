@@ -4,6 +4,7 @@ Run with: uvicorn backend.main:app --reload
       or: python run.py
 """
 
+import asyncio
 import os
 import uuid
 import logging
@@ -20,6 +21,7 @@ from backend.database import get_db, init_db
 from backend import crud, schemas
 from backend import ai_service
 from backend import file_service
+from backend.routes.image_routes import router as image_router
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -30,22 +32,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
-
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
-ALLOWED_EXTENSIONS = {"pdf", "txt"}
-
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     logger.info("=== Jarvis AI Assistant started ===")
-    ai_info = ai_service.check_ai_service()
-    if ai_info["status"] == "ok":
-        logger.info("AI Service: Ready | model '%s'", ai_service.MODEL_NAME)
+    if os.getenv("GROQ_API_KEY"):
+        logger.info(
+            "AI Service configured | model '%s' | timeout=%.1fs",
+            ai_service.MODEL_NAME,
+            ai_service.GROQ_TIMEOUT_SECONDS,
+        )
     else:
-        logger.warning("AI Service Error: %s", ai_info.get("detail", "Unknown"))
+        logger.warning("AI Service is not configured: GROQ_API_KEY is missing.")
     yield
     logger.info("=== Jarvis AI Assistant shutting down ===")
 
@@ -71,18 +71,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def disable_frontend_caching(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/app" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+app.include_router(image_router)
+
 
 # ─── Root ─────────────────────────────────────────────────────────────────────
 
-@app.get("/", include_in_schema=False)
-def serve_frontend():
+@app.get("/", tags=["Health"])
+async def root():
+    return {"status": "Jarvis running"}
+
+
+@app.get("/app", include_in_schema=False)
+async def serve_frontend():
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health", tags=["Health"])
-def health_check():
+async def health_check():
     return {
         "status": "ok",
         "service": "Jarvis AI Assistant",
@@ -93,7 +109,7 @@ def health_check():
 # ─── Chat ─────────────────────────────────────────────────────────────────────
 
 @app.post("/api/chat", response_model=schemas.ChatResponse, tags=["Chat"])
-def chat(request: schemas.ChatRequest, db: Session = Depends(get_db)):
+async def chat(request: schemas.ChatRequest, db: Session = Depends(get_db)):
     """Standard chat endpoint — no file context."""
     logger.info("POST /api/chat | conv_id=%s | msg='%.60s'...", request.conversation_id, request.message)
 
@@ -113,7 +129,11 @@ def chat(request: schemas.ChatRequest, db: Session = Depends(get_db)):
     if len(history) > 15:
         history = history[-15:]
 
-    reply = ai_service.generate_response(request.message, history=history)
+    reply = await asyncio.to_thread(
+        ai_service.generate_response,
+        request.message,
+        history,
+    )
 
     assistant_msg = crud.create_message(db, schemas.MessageCreate(
         conversation_id=convo.id, role="assistant", content=reply,
@@ -130,68 +150,66 @@ def chat(request: schemas.ChatRequest, db: Session = Depends(get_db)):
 
 # ─── File Upload ──────────────────────────────────────────────────────────────
 
+def _upload_error_status(detail: str) -> int:
+    detail_lower = detail.lower()
+    if "too large" in detail_lower:
+        return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    if "no readable text" in detail_lower:
+        return status.HTTP_422_UNPROCESSABLE_ENTITY
+    if "failed to read" in detail_lower or "extractable text" in detail_lower:
+        return status.HTTP_422_UNPROCESSABLE_ENTITY
+    return status.HTTP_400_BAD_REQUEST
+
+
+def _recent_history(messages, limit: int = 8) -> list[dict[str, str]]:
+    history = [{"role": msg.role, "content": msg.content} for msg in messages]
+    return history[-limit:] if len(history) > limit else history
+
+
+def _extract_and_chunk_document(content: bytes, filename: str) -> tuple[str, list[str]]:
+    text = file_service.extract_text(content, filename)
+    chunks = file_service.chunk_text(text)
+    return text, chunks
+
 @app.post("/api/upload", response_model=schemas.UploadResponse, tags=["Files"])
 async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """
-    Upload a PDF or TXT file.
-    - Validates type and size
-    - Extracts text, chunks it, embeds each chunk, stores in DB
-    - Returns a file_id for subsequent /api/file-chat calls
-    """
-    # Validate file extension
+    """Upload a PDF or TXT file and store extracted document chunks."""
     original_name = file.filename or "upload"
-    ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '.{ext}'. Allowed: PDF, TXT.",
-        )
-
-    # Read and validate size
     content = await file.read()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large ({len(content) // 1024} KB). Maximum is 10 MB.",
-        )
-    if len(content) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    logger.info("Upload: '%s' | %d bytes | type=%s", original_name, len(content), ext)
-
-    # Extract text
     try:
-        text = file_service.extract_text(content, original_name)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        ext = file_service.validate_upload(original_name, file.content_type, content)
+        text, chunks = await asyncio.to_thread(
+            _extract_and_chunk_document,
+            content,
+            original_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=_upload_error_status(str(exc)),
+            detail=str(exc),
+        ) from exc
 
     if not text.strip():
         raise HTTPException(status_code=422, detail="No readable text found in the file.")
 
-    # Chunk text
-    chunks = file_service.chunk_text(text)
     if not chunks:
         raise HTTPException(status_code=422, detail="Document is too short to process.")
 
-    logger.info("Chunked '%s' into %d chunks. Embedding…", original_name, len(chunks))
+    logger.info(
+        "Upload: '%s' | %d bytes | %d chunks",
+        original_name,
+        len(content),
+        len(chunks),
+    )
 
-    # Embed all chunks
-    try:
-        embeddings = file_service.embed_texts(chunks)
-    except Exception as e:
-        logger.error("Embedding failed: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to process document embeddings.")
-
-    # Persist metadata + chunks
     file_id = str(uuid.uuid4())
     crud.create_file_document(
         db, file_id=file_id, filename=original_name,
         file_type=ext, chunk_count=len(chunks),
     )
-
     chunk_rows = [
-        (i, text, file_service.embedding_to_bytes(embeddings[i]))
-        for i, text in enumerate(chunks)
+        (i, chunk_text, b"")
+        for i, chunk_text in enumerate(chunks)
     ]
     crud.create_file_chunks(db, file_id=file_id, chunks=chunk_rows)
 
@@ -207,90 +225,87 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
 # ─── File Chat ────────────────────────────────────────────────────────────────
 
 FILE_CHAT_SYSTEM_PROMPT = """You are Jarvis, an intelligent AI assistant analyzing a document.
-
-Rules:
-- Answer ONLY using the document context provided below.
-- If the answer is not in the context, say: "I couldn't find that information in the document."
-- Quote or reference specific parts of the document when helpful.
-- Be concise, accurate, and well-formatted.
-- Use bullet points, headings, or code blocks where appropriate."""
+Answer ONLY using the document context.
+If the answer is not found in the document, reply exactly: Not found in document
+Use clean formatting."""
 
 
 @app.post("/api/file-chat", response_model=schemas.ChatResponse, tags=["Files"])
-def file_chat(request: schemas.FileChatRequest, db: Session = Depends(get_db)):
-    """
-    Chat with a specific uploaded document using RAG.
-    - Retrieves top-k semantically similar chunks
-    - Combines with conversation history
-    - Returns a grounded, document-aware response
-    """
+async def file_chat(request: schemas.FileChatRequest, db: Session = Depends(get_db)):
+    """Chat with a specific uploaded document using chunk retrieval."""
     logger.info("POST /api/file-chat | file_id=%s | query='%.60s'...", request.file_id, request.query)
 
-    # Validate file exists
     file_doc = crud.get_file_document(db, request.file_id)
     if not file_doc:
         raise HTTPException(status_code=404, detail="File not found. Please upload it again.")
 
-    # Get or create conversation
     if request.conversation_id:
         convo = crud.get_conversation(db, request.conversation_id)
         if not convo:
             raise HTTPException(status_code=404, detail="Conversation not found.")
+        if convo.document_file_id and convo.document_file_id != request.file_id:
+            raise HTTPException(status_code=400, detail="This conversation is linked to a different document.")
+        if not convo.document_file_id:
+            convo = crud.update_conversation(
+                db,
+                convo.id,
+                schemas.ConversationUpdate(
+                    document_file_id=file_doc.file_id,
+                    document_filename=file_doc.filename,
+                ),
+            )
     else:
         title = f"[{file_doc.filename}] {request.query[:50]}"
-        convo = crud.create_conversation(db, schemas.ConversationCreate(title=title))
+        convo = crud.create_conversation(
+            db,
+            schemas.ConversationCreate(
+                title=title,
+                document_file_id=file_doc.file_id,
+                document_filename=file_doc.filename,
+            ),
+        )
 
-    # Save user message
     crud.create_message(db, schemas.MessageCreate(
         conversation_id=convo.id, role="user", content=request.query,
     ))
 
-    # Retrieve relevant chunks via semantic search
-    try:
-        relevant_chunks = file_service.retrieve_chunks(
-            query=request.query,
-            file_id=request.file_id,
-            db=db,
-        )
-    except Exception as e:
-        logger.error("Chunk retrieval failed for file_id=%s: %s", request.file_id, e)
-        relevant_chunks = []
-
-    if not relevant_chunks:
-        no_context_reply = "I couldn't find relevant information in the document to answer your question."
-        assistant_msg = crud.create_message(db, schemas.MessageCreate(
-            conversation_id=convo.id, role="assistant", content=no_context_reply,
-        ))
-        return schemas.ChatResponse(
-            reply=no_context_reply,
-            conversation_id=convo.id,
-            message_id=assistant_msg.id,
-            model=ai_service.MODEL_NAME,
+    chunk_rows = crud.get_file_chunks(db, request.file_id)
+    if not chunk_rows:
+        raise HTTPException(
+            status_code=500,
+            detail="Document chunks are missing. Please upload the file again.",
         )
 
-    # Format document context block
-    context_block = "\n\n---\n\n".join(
-        f"[Excerpt {i+1}]\n{chunk}" for i, chunk in enumerate(relevant_chunks)
-    )
-    context_message = {
-        "role": "user",
-        "content": f"Document context (use ONLY this to answer):\n\n{context_block}",
-    }
-
-    # Build conversation history (last 10 turns max)
+    chunk_texts = [chunk.content for chunk in chunk_rows]
     existing = crud.get_messages(db, convo.id)
-    history  = [{"role": m.role, "content": m.content} for m in existing[:-1]]
-    if len(history) > 10:
-        history = history[-10:]
-
-    # Call Groq with document-specific system prompt
-    reply = ai_service.generate_response(
-        message=request.query,
-        history=[context_message] + history,
-        system_prompt_override=FILE_CHAT_SYSTEM_PROMPT,
+    history = _recent_history(existing[:-1], limit=10)
+    retrieval_query = await asyncio.to_thread(
+        file_service.build_retrieval_query,
+        request.query,
+        history,
+    )
+    relevant_chunks = await asyncio.to_thread(
+        file_service.retrieve_chunks,
+        retrieval_query,
+        chunk_texts,
+        5,
+    )
+    context_block = file_service.format_chunks_for_prompt(relevant_chunks)
+    messages = [
+        {"role": "system", "content": FILE_CHAT_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": f"Document: {file_doc.filename}\n\nContext:\n{context_block}",
+        },
+        *history,
+        {"role": "user", "content": request.query},
+    ]
+    reply = await asyncio.to_thread(
+        ai_service.generate_response_from_messages,
+        messages,
+        "I couldn't analyze the document right now. Please try again.",
     )
 
-    # Persist assistant reply
     assistant_msg = crud.create_message(db, schemas.MessageCreate(
         conversation_id=convo.id, role="assistant", content=reply,
     ))
@@ -317,9 +332,8 @@ def list_files(db: Session = Depends(get_db)):
 
 @app.delete("/api/files/{file_id}", tags=["Files"])
 def delete_file(file_id: str, db: Session = Depends(get_db)):
-    """Delete a file document and all its chunks. Evicts in-memory FAISS index."""
+    """Delete a file document and all its chunks."""
     deleted = crud.delete_file_document(db, file_id)
-    file_service.evict_index(file_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="File not found.")
     return {"message": "File deleted successfully."}
