@@ -4,11 +4,16 @@
 
 const API = {
   base: '/api',
-  async request(method, path, body = null) {
-    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  async request(method, path, body = null, options = {}) {
+    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    const token = state.authToken;
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
     try {
-      const res = await fetch(`${this.base}${path}`, opts);
+      const url = options.rawPath ? path : `${this.base}${path}`;
+      const res = await fetch(url, opts);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `Request failed (${res.status})`);
@@ -26,11 +31,15 @@ const API = {
   post:   (path, body)  => API.request('POST', path, body),
   patch:  (path, body)  => API.request('PATCH', path, body),
   delete: (path)        => API.request('DELETE', path),
+  postRaw: (path, body) => API.request('POST', path, body, { rawPath: true }),
+  getRaw:  (path)       => API.request('GET', path, null, { rawPath: true }),
 
   /** Upload a file using multipart/form-data (no Content-Type override). */
   async upload(path, formData) {
     try {
-      const res = await fetch(`${this.base}${path}`, { method: 'POST', body: formData });
+      const headers = {};
+      if (state.authToken) headers.Authorization = `Bearer ${state.authToken}`;
+      const res = await fetch(`${this.base}${path}`, { method: 'POST', body: formData, headers });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `Upload failed (${res.status})`);
@@ -53,6 +62,8 @@ const state = {
   editingNoteId:         null,
   /** Active file: { id: string, name: string, meta?: string } | null */
   activeFile:            null,
+  authToken:             localStorage.getItem('jarvis_auth_token'),
+  currentUserId:         localStorage.getItem('jarvis_user_id'),
 };
 
 const DEFAULT_INPUT_HINT =
@@ -63,6 +74,20 @@ const DEFAULT_INPUT_HINT =
 const $ = (id) => document.getElementById(id);
 
 const els = {
+  authScreen:       $('authScreen'),
+  loginTabBtn:      $('loginTabBtn'),
+  signupTabBtn:     $('signupTabBtn'),
+  loginForm:        $('loginForm'),
+  signupForm:       $('signupForm'),
+  loginEmail:       $('loginEmail'),
+  loginPassword:    $('loginPassword'),
+  signupEmail:      $('signupEmail'),
+  signupPassword:   $('signupPassword'),
+  loginSubmitBtn:   $('loginSubmitBtn'),
+  signupSubmitBtn:  $('signupSubmitBtn'),
+  authMessage:      $('authMessage'),
+  authUserLabel:    $('authUserLabel'),
+  logoutBtn:        $('logoutBtn'),
   messagesArea:     $('messagesArea'),
   welcomeSplash:    $('welcomeSplash'),
   messageInput:     $('messageInput'),
@@ -107,6 +132,173 @@ function renderMarkdown(content) {
     : raw;
 }
 
+// ─── Authentication ────────────────────────────────────────────────────────────
+
+function setAuthMode(mode) {
+  const isLogin = mode === 'login';
+  els.loginTabBtn.classList.toggle('active', isLogin);
+  els.signupTabBtn.classList.toggle('active', !isLogin);
+  els.loginForm.classList.toggle('hidden', !isLogin);
+  els.signupForm.classList.toggle('hidden', isLogin);
+  setAuthMessage(
+    isLogin
+      ? 'Log in with an existing Jarvis account.'
+      : 'Create a new account to start using Jarvis.'
+  );
+}
+
+function setAuthMessage(message, type = '') {
+  if (!els.authMessage) return;
+  els.authMessage.className = `auth-message${type ? ` ${type}` : ''}`;
+  els.authMessage.textContent = message;
+}
+
+function setAuthState(token, userId) {
+  state.authToken = token || null;
+  state.currentUserId = userId == null ? null : String(userId);
+
+  if (state.authToken) {
+    localStorage.setItem('jarvis_auth_token', state.authToken);
+  } else {
+    localStorage.removeItem('jarvis_auth_token');
+  }
+
+  if (state.currentUserId) {
+    localStorage.setItem('jarvis_user_id', state.currentUserId);
+  } else {
+    localStorage.removeItem('jarvis_user_id');
+  }
+
+  updateAuthUi();
+}
+
+function updateAuthUi() {
+  const authenticated = Boolean(state.authToken && state.currentUserId);
+  els.authScreen.classList.toggle('hidden', authenticated);
+  els.authUserLabel.textContent = authenticated
+    ? `User #${state.currentUserId}`
+    : 'Not authenticated';
+  els.logoutBtn.disabled = !authenticated;
+}
+
+function resetAppState() {
+  state.currentConversationId = null;
+  state.isLoading = false;
+  state.editingNoteId = null;
+  clearActiveFile();
+  els.chatTitle.textContent = 'New Conversation';
+  delete els.chatTitle.dataset.set;
+  els.messagesArea.innerHTML = '';
+  els.messagesArea.appendChild(els.welcomeSplash);
+  els.welcomeSplash.style.display = '';
+  els.noteEditor.classList.add('hidden');
+  els.noteTitleInput.value = '';
+  els.noteContentInput.value = '';
+}
+
+async function verifyStoredSession() {
+  if (!state.authToken) {
+    updateAuthUi();
+    return false;
+  }
+
+  try {
+    const data = await API.getRaw('/protected');
+    setAuthState(state.authToken, data.user_id);
+    return true;
+  } catch {
+    setAuthState(null, null);
+    setAuthMessage('Your session expired. Please log in again.', 'error');
+    return false;
+  }
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  const email = els.loginEmail.value.trim();
+  const password = els.loginPassword.value;
+  if (!email || !password) {
+    setAuthMessage('Please enter your email and password.', 'error');
+    return;
+  }
+
+  els.loginSubmitBtn.disabled = true;
+  setAuthMessage('Logging you in...');
+  try {
+    const loginData = await API.postRaw('/login', { email, password });
+    const protectedData = await API.request(
+      'GET',
+      '/protected',
+      null,
+      {
+        rawPath: true,
+        headers: { Authorization: `Bearer ${loginData.access_token}` },
+      }
+    );
+    setAuthState(loginData.access_token, protectedData.user_id);
+    setAuthMessage('Login successful.', 'success');
+    els.loginForm.reset();
+    showToast(`Logged in as user #${protectedData.user_id}.`, 'success');
+    els.messageInput.focus();
+  } catch (err) {
+    setAuthState(null, null);
+    setAuthMessage(err.message || 'Login failed.', 'error');
+  } finally {
+    els.loginSubmitBtn.disabled = false;
+  }
+}
+
+async function handleSignup(event) {
+  event.preventDefault();
+  const email = els.signupEmail.value.trim();
+  const password = els.signupPassword.value;
+  if (!email || !password) {
+    setAuthMessage('Please enter your email and password.', 'error');
+    return;
+  }
+
+  els.signupSubmitBtn.disabled = true;
+  setAuthMessage('Creating your account...');
+  try {
+    await API.postRaw('/register', { email, password });
+    setAuthMessage('Account created. Logging you in now...', 'success');
+    const loginData = await API.postRaw('/login', { email, password });
+    const protectedData = await API.request(
+      'GET',
+      '/protected',
+      null,
+      {
+        rawPath: true,
+        headers: { Authorization: `Bearer ${loginData.access_token}` },
+      }
+    );
+    setAuthState(loginData.access_token, protectedData.user_id);
+    els.signupForm.reset();
+    showToast('Account created and logged in.', 'success');
+    els.messageInput.focus();
+  } catch (err) {
+    setAuthState(null, null);
+    setAuthMessage(err.message || 'Sign up failed.', 'error');
+  } finally {
+    els.signupSubmitBtn.disabled = false;
+  }
+}
+
+function handleLogout() {
+  setAuthState(null, null);
+  resetAppState();
+  switchTab('chat');
+  setAuthMode('login');
+  setAuthMessage('You have been logged out.', 'success');
+  showToast('Logged out.', 'success');
+}
+
+els.loginTabBtn.addEventListener('click', () => setAuthMode('login'));
+els.signupTabBtn.addEventListener('click', () => setAuthMode('signup'));
+els.loginForm.addEventListener('submit', handleLogin);
+els.signupForm.addEventListener('submit', handleSignup);
+els.logoutBtn.addEventListener('click', handleLogout);
+
 // ─── Tab Navigation ────────────────────────────────────────────────────────────
 
 function switchTab(tabName) {
@@ -129,6 +321,13 @@ document.querySelectorAll('.nav-btn').forEach((btn) => {
 els.uploadBtn.addEventListener('click', () => els.fileInput.click());
 
 els.fileInput.addEventListener('change', async () => {
+  if (!state.authToken) {
+    els.fileInput.value = '';
+    updateAuthUi();
+    setAuthMessage('Please log in to upload a document.', 'error');
+    return;
+  }
+
   const file = els.fileInput.files[0];
   if (!file) return;
 
@@ -345,6 +544,12 @@ function hideSplash()   { if (els.welcomeSplash) els.welcomeSplash.style.display
 // ─── Send Message ─────────────────────────────────────────────────────────────
 
 async function sendMessage() {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to chat with Jarvis.', 'error');
+    return;
+  }
+
   const content = els.messageInput.value.trim();
   if (!content || state.isLoading) return;
 
@@ -436,6 +641,7 @@ els.newChatBtn.addEventListener('click', () => {
 // ─── Notes ─────────────────────────────────────────────────────────────────────
 
 async function loadNotes() {
+  if (!state.authToken) return;
   try {
     const notes = await API.get('/notes');
     renderNotes(notes);
@@ -480,12 +686,25 @@ function openEditNote(id, notes) {
   if (note) openEditor(note.title, note.content, note.id);
 }
 
-els.addNoteBtn.addEventListener('click', () => openEditor());
+els.addNoteBtn.addEventListener('click', () => {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to manage notes.', 'error');
+    return;
+  }
+  openEditor();
+});
 els.cancelNoteBtn.addEventListener('click', () => {
   els.noteEditor.classList.add('hidden');
   state.editingNoteId = null;
 });
 els.saveNoteBtn.addEventListener('click', async () => {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to manage notes.', 'error');
+    return;
+  }
+
   const title   = els.noteTitleInput.value.trim();
   const content = els.noteContentInput.value.trim();
   if (!title)   { showToast('Please enter a title.', 'error'); return; }
@@ -505,6 +724,11 @@ els.saveNoteBtn.addEventListener('click', async () => {
 });
 
 async function deleteNote(id) {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to manage notes.', 'error');
+    return;
+  }
   if (!confirm('Delete this note?')) return;
   try {
     await API.delete(`/notes/${id}`);
@@ -516,6 +740,7 @@ async function deleteNote(id) {
 // ─── History ───────────────────────────────────────────────────────────────────
 
 async function loadHistory() {
+  if (!state.authToken) return;
   try {
     const convos = await API.get('/conversations');
     renderHistory(convos);
@@ -550,6 +775,7 @@ function renderHistory(convos) {
 }
 
 async function loadConversation(id) {
+  if (!state.authToken) return;
   try {
     const [messages, convo] = await Promise.all([
       API.get(`/conversations/${id}/messages`),
@@ -581,6 +807,11 @@ async function loadConversation(id) {
 }
 
 async function deleteConversation(id) {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to access conversations.', 'error');
+    return;
+  }
   if (!confirm('Archive this conversation?')) return;
   try {
     await API.delete(`/conversations/${id}`);
@@ -643,6 +874,14 @@ async function checkHealth() {
 // ─── Init ──────────────────────────────────────────────────────────────────────
 
 window.addEventListener('DOMContentLoaded', () => {
+  updateAuthUi();
+  setAuthMode('login');
   checkHealth();
-  els.messageInput.focus();
+  verifyStoredSession().then((authenticated) => {
+    if (authenticated) {
+      els.messageInput.focus();
+    } else {
+      els.loginEmail.focus();
+    }
+  });
 });

@@ -17,11 +17,14 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
+from backend.auth import router as auth_router
 from backend.database import get_db, init_db
+from backend.dependencies import get_current_user
 from backend import crud, schemas
 from backend import ai_service
 from backend import file_service
 from backend.routes.image_routes import router as image_router
+from backend.utils import SECRET_KEY
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not SECRET_KEY:
+        raise RuntimeError("SECRET_KEY environment variable is required to start the application.")
     init_db()
     logger.info("=== Jarvis AI Assistant started ===")
     if os.getenv("GROQ_API_KEY"):
@@ -81,6 +86,7 @@ async def disable_frontend_caching(request, call_next):
     return response
 
 app.include_router(image_router)
+app.include_router(auth_router)
 
 
 # ─── Root ─────────────────────────────────────────────────────────────────────
@@ -88,6 +94,11 @@ app.include_router(image_router)
 @app.get("/", tags=["Health"])
 async def root():
     return {"status": "Jarvis running"}
+
+
+@app.get("/protected", response_model=schemas.ProtectedResponse, tags=["Authentication"])
+def protected_route(current_user_id: int = Depends(get_current_user)):
+    return schemas.ProtectedResponse(user_id=current_user_id)
 
 
 @app.get("/app", include_in_schema=False)

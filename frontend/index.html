@@ -17,6 +17,43 @@
     <span class="orb orb-3"></span>
   </div>
 
+  <section class="auth-screen" id="authScreen">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <span class="auth-logo">⚡</span>
+        <h1>Jarvis Authentication</h1>
+        <p>Sign in or create an account to use Jarvis from the browser.</p>
+      </div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" id="loginTabBtn" type="button">Login</button>
+        <button class="auth-tab" id="signupTabBtn" type="button">Sign Up</button>
+      </div>
+
+      <form class="auth-form" id="loginForm">
+        <label class="auth-label" for="loginEmail">Email</label>
+        <input class="auth-input" id="loginEmail" type="email" autocomplete="email" required />
+
+        <label class="auth-label" for="loginPassword">Password</label>
+        <input class="auth-input" id="loginPassword" type="password" autocomplete="current-password" required minlength="8" />
+
+        <button class="btn-primary auth-submit" id="loginSubmitBtn" type="submit">Login</button>
+      </form>
+
+      <form class="auth-form hidden" id="signupForm">
+        <label class="auth-label" for="signupEmail">Email</label>
+        <input class="auth-input" id="signupEmail" type="email" autocomplete="email" required />
+
+        <label class="auth-label" for="signupPassword">Password</label>
+        <input class="auth-input" id="signupPassword" type="password" autocomplete="new-password" required minlength="8" />
+
+        <button class="btn-primary auth-submit" id="signupSubmitBtn" type="submit">Create Account</button>
+      </form>
+
+      <p class="auth-message" id="authMessage">Use your backend auth endpoints directly from this UI.</p>
+    </div>
+  </section>
+
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
@@ -47,6 +84,13 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           New Chat
         </button>
+        <div class="auth-panel">
+          <div class="auth-panel-copy">
+            <span class="auth-panel-label">Signed in</span>
+            <span class="auth-panel-value" id="authUserLabel">Not authenticated</span>
+          </div>
+          <button class="btn-ghost auth-logout-btn" id="logoutBtn" type="button">Logout</button>
+        </div>
       </div>
     </aside>
 

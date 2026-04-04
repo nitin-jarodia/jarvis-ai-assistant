@@ -2,9 +2,35 @@
 Pydantic schemas for request/response validation in Jarvis AI Assistant.
 """
 
-from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel, EmailStr, Field
+
+
+# ─── Authentication Schemas ────────────────────────────────────────────────────
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class RegisterResponse(BaseModel):
+    message: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class ProtectedResponse(BaseModel):
+    user_id: int
 
 
 # ─── Conversation Schemas ─────────────────────────────────────────────────────

@@ -1,38 +1,34 @@
-"""
-Database configuration and session management for Jarvis AI Assistant.
-Uses SQLite via SQLAlchemy 2.x.
-"""
+"""Database configuration and session management for Jarvis AI Assistant."""
 
-import os
 import logging
+import os
+from typing import Generator
+
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# SQLite database file stored in project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'jarvis.db')}"
 
-logger.debug("Using database: %s", DATABASE_URL)
-
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},  # Required for SQLite with FastAPI
-    echo=False,  # Set to True to log all SQL statements
+    connect_args={"check_same_thread": False},
+    echo=False,
 )
-
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 _db_ready = False
 
 
 class Base(DeclarativeBase):
-    """SQLAlchemy 2.x declarative base."""
     pass
 
 
-def get_db():
-    """FastAPI dependency: provides a DB session per request, auto-closes after."""
+def get_db() -> Generator[Session, None, None]:
     ensure_db_ready()
     db = SessionLocal()
     try:
@@ -41,27 +37,24 @@ def get_db():
         db.close()
 
 
-def init_db():
-    """Create all tables in the database on startup."""
+def init_db() -> None:
     ensure_db_ready()
     logger.info("Database tables created/verified at: %s", DATABASE_URL)
 
 
-def ensure_db_ready():
-    """Initialize tables and apply migrations once per process."""
+def ensure_db_ready() -> None:
     global _db_ready
     if _db_ready:
         return
 
-    from backend import models  # noqa: F401 - import triggers model registration
+    from backend import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _run_migrations()
     _db_ready = True
 
 
-def _run_migrations():
-    """Apply lightweight SQLite schema migrations for newly added columns."""
+def _run_migrations() -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
 
