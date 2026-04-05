@@ -1,0 +1,198 @@
+/**
+ * Jarvis AI — global motion tokens and reusable animation utilities.
+ * Palette: primary #ec912e, secondary #3042a1, accent #227594, neutral #d4d1cb
+ * prefers-reduced-motion: animations collapse to near-instant / opacity-only.
+ */
+
+:root {
+  /* Durations: premium SaaS feel — snappy, not sluggish */
+  --motion-fast: 220ms;
+  --motion-medium: 380ms;
+  --motion-slow: 480ms;
+  --ease-out-premium: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.45, 0, 0.55, 1);
+}
+
+/* ─── Page / section entrance ─────────────────────────────────────────────── */
+
+@keyframes jarvis-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes jarvis-message-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes jarvis-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes jarvis-skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+/* ─── Reusable utility classes (opt-in from markup or JS) ────────────────── */
+
+.smooth-transition {
+  transition-property: opacity, transform, background-color, border-color, box-shadow, color;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-out-premium);
+}
+
+.fade-in {
+  animation: jarvis-fade-in-up var(--motion-slow) var(--ease-out-premium) 0s 1 forwards;
+}
+
+.slide-up {
+  animation: jarvis-message-in var(--motion-medium) var(--ease-out-premium) 0s 1 forwards;
+}
+
+/* Message rows: applied when creating DOM in app.js */
+.message-enter {
+  animation: jarvis-message-in var(--motion-medium) var(--ease-out-premium) var(--msg-delay, 0s) 1 both;
+}
+
+.toast-enter {
+  animation: jarvis-toast-in var(--motion-fast) var(--ease-out-premium) 0s 1 forwards;
+}
+
+/* Interactive controls: hover lift + active press (used with existing button rules) */
+.hover-scale {
+  transition:
+    transform var(--motion-fast) var(--ease-out-premium),
+    background-color var(--motion-fast) var(--ease-out-premium),
+    border-color var(--motion-fast) var(--ease-out-premium),
+    box-shadow var(--motion-fast) var(--ease-out-premium),
+    filter var(--motion-fast) var(--ease-out-premium);
+}
+
+.hover-scale:hover:not(:disabled) {
+  transform: scale(1.04);
+}
+
+.hover-scale:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Skeleton placeholder blocks */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  background: linear-gradient(
+    105deg,
+    rgba(212, 209, 203, 0.35) 0%,
+    rgba(212, 209, 203, 0.55) 42%,
+    rgba(212, 209, 203, 0.35) 85%
+  );
+  background-size: 200% 100%;
+  animation: jarvis-skeleton-shimmer 1.35s var(--ease-in-out-soft) infinite;
+}
+
+.skeleton-line {
+  height: 14px;
+  margin-bottom: 10px;
+}
+
+.skeleton-line:last-child {
+  margin-bottom: 0;
+  width: 72%;
+}
+
+/* App shell initial paint: class toggled from app.js after DOM ready */
+body:not(.app-ready) .app-shell {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+body.app-ready .app-shell {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--motion-slow) var(--ease-out-premium),
+    transform var(--motion-slow) var(--ease-out-premium);
+}
+
+/* Auth card: subtle entrance when overlay visible */
+.auth-screen .auth-card {
+  animation: jarvis-fade-in-up var(--motion-slow) var(--ease-out-premium) both;
+}
+
+/* ─── Reduced motion: respect OS / browser preference ───────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in,
+  .slide-up,
+  .message-enter,
+  .toast-enter,
+  .auth-screen .auth-card {
+    animation: none !important;
+  }
+
+  body:not(.app-ready) .app-shell {
+    opacity: 1;
+    transform: none;
+  }
+
+  body.app-ready .app-shell {
+    transition: none;
+  }
+
+  .skeleton {
+    animation: none;
+    background: rgba(212, 209, 203, 0.45);
+  }
+
+  .hover-scale:hover:not(:disabled),
+  .hover-scale:active:not(:disabled) {
+    transform: none;
+  }
+
+  /* Tab panels: still swap instantly without fade */
+  .tab-panel {
+    transition: none !important;
+  }
+
+  .welcome-splash {
+    animation: none !important;
+  }
+
+  .toast {
+    animation: none !important;
+  }
+
+  .notes-grid > .note-card,
+  .history-list > .history-item {
+    animation: none !important;
+  }
+
+  .sidebar {
+    transition: none !important;
+  }
+}

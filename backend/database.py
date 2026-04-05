@@ -57,27 +57,76 @@ def ensure_db_ready() -> None:
 def _run_migrations() -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-
-    if "conversations" not in table_names:
-        return
-
-    conversation_columns = {
-        column["name"] for column in inspector.get_columns("conversations")
-    }
-    statements: list[str] = []
-
-    if "document_file_id" not in conversation_columns:
-        statements.append(
-            "ALTER TABLE conversations ADD COLUMN document_file_id VARCHAR(36)"
-        )
-    if "document_filename" not in conversation_columns:
-        statements.append(
-            "ALTER TABLE conversations ADD COLUMN document_filename VARCHAR(255)"
-        )
-
-    if not statements:
-        return
-
     with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
+        if "users" in table_names:
+            user_columns = {column["name"] for column in inspector.get_columns("users")}
+            if "password_hash" not in user_columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255)"))
+            if "password" in user_columns:
+                connection.execute(
+                    text(
+                        "UPDATE users SET password_hash = password "
+                        "WHERE password_hash IS NULL OR password_hash = ''"
+                    )
+                )
+
+        if "conversations" in table_names:
+            conversation_columns = {
+                column["name"] for column in inspector.get_columns("conversations")
+            }
+            if "document_file_id" not in conversation_columns:
+                connection.execute(
+                    text("ALTER TABLE conversations ADD COLUMN document_file_id VARCHAR(36)")
+                )
+            if "document_filename" not in conversation_columns:
+                connection.execute(
+                    text("ALTER TABLE conversations ADD COLUMN document_filename VARCHAR(255)")
+                )
+
+        if "messages" in table_names:
+            message_columns = {column["name"] for column in inspector.get_columns("messages")}
+            if "chat_id" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN chat_id INTEGER"))
+                if "conversation_id" in message_columns:
+                    connection.execute(text("UPDATE messages SET chat_id = conversation_id WHERE chat_id IS NULL"))
+            if "agent_type" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN agent_type VARCHAR(32)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_chat_id ON messages (chat_id)"))
+
+        if "file_documents" in table_names:
+            file_columns = {column["name"] for column in inspector.get_columns("file_documents")}
+            if "user_id" not in file_columns:
+                connection.execute(text("ALTER TABLE file_documents ADD COLUMN user_id INTEGER"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_file_documents_user_id ON file_documents (user_id)"))
+
+        if "chats" in table_names and "conversations" in table_names:
+            chat_count = connection.execute(text("SELECT COUNT(*) FROM chats")).scalar_one()
+            if chat_count == 0:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO chats (
+                            id, user_id, title, document_file_id, document_filename,
+                            created_at, updated_at, is_active
+                        )
+                        SELECT
+                            id,
+                            NULL,
+                            COALESCE(title, 'New Chat'),
+                            document_file_id,
+                            document_filename,
+                            created_at,
+                            updated_at,
+                            COALESCE(is_active, 1)
+                        FROM conversations
+                        """
+                    )
+                )
+
+        if "messages" in table_names:
+            connection.execute(
+                text(
+                    "UPDATE messages SET chat_id = conversation_id "
+                    "WHERE chat_id IS NULL AND conversation_id IS NOT NULL"
+                )
+            )

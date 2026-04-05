@@ -1,77 +1,96 @@
-"""
-SQLAlchemy ORM models for Jarvis AI Assistant.
-"""
+"""SQLAlchemy ORM models for Jarvis AI Assistant."""
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, LargeBinary
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
 from backend.database import Base
 
 
 class User(Base):
     """Stores application users for JWT authentication."""
+
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
-    password = Column(String(255), nullable=False)
+    password = Column(String(255), nullable=True)
+    password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    chats = relationship("Chat", back_populates="user")
+    file_documents = relationship("FileDocument", back_populates="user")
 
-class Conversation(Base):
-    """Stores chat conversation sessions."""
-    __tablename__ = "conversations"
 
-    id                = Column(Integer, primary_key=True, index=True)
-    title             = Column(String(255), nullable=False, default="New Conversation")
-    document_file_id  = Column(String(36), nullable=True, index=True)
+class Chat(Base):
+    """Stores user-owned chat sessions."""
+
+    __tablename__ = "chats"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    title = Column(String(255), nullable=False, default="New Chat")
+    document_file_id = Column(String(36), nullable=True, index=True)
     document_filename = Column(String(255), nullable=True)
-    created_at        = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at        = Column(DateTime(timezone=True), onupdate=func.now())
-    is_active         = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    user = relationship("User", back_populates="chats")
+    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
 
 
 class Message(Base):
-    """Stores individual messages within a conversation."""
+    """Stores individual messages within a user-owned chat."""
+
     __tablename__ = "messages"
 
-    id              = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(Integer, nullable=False, index=True)
-    role            = Column(String(50), nullable=False)   # 'user' or 'assistant'
-    content         = Column(Text, nullable=False)
-    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, nullable=True, index=True)
+    chat_id = Column(Integer, ForeignKey("chats.id"), nullable=False, index=True)
+    role = Column(String(50), nullable=False)  # 'user' or 'assistant'
+    agent_type = Column(String(32), nullable=True)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    chat = relationship("Chat", back_populates="messages")
 
 
 class Note(Base):
     """Stores quick notes saved by the user via Jarvis."""
+
     __tablename__ = "notes"
 
-    id         = Column(Integer, primary_key=True, index=True)
-    title      = Column(String(255), nullable=False)
-    content    = Column(Text, nullable=False)
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
-# ─── Document / File Models ───────────────────────────────────────────────────
-
 class FileDocument(Base):
     """Metadata for an uploaded file document."""
+
     __tablename__ = "file_documents"
 
-    id          = Column(Integer, primary_key=True, index=True)
-    file_id     = Column(String(36), unique=True, index=True, nullable=False)  # UUID
-    filename    = Column(String(255), nullable=False)
-    file_type   = Column(String(10), nullable=False)   # 'pdf' or 'txt'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    file_id = Column(String(36), unique=True, index=True, nullable=False)
+    filename = Column(String(255), nullable=False)
+    file_type = Column(String(10), nullable=False)
     chunk_count = Column(Integer, nullable=False, default=0)
-    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="file_documents")
 
 
 class FileChunk(Base):
     """A single text chunk from a FileDocument with its embedding vector."""
+
     __tablename__ = "file_chunks"
 
-    id          = Column(Integer, primary_key=True, index=True)
-    file_id     = Column(String(36), nullable=False, index=True)
-    chunk_index = Column(Integer, nullable=False)     # order within document
-    content     = Column(Text, nullable=False)
-    embedding   = Column(LargeBinary, nullable=False) # float32 bytes
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(String(36), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    embedding = Column(LargeBinary, nullable=False)

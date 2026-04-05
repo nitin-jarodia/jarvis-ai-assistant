@@ -23,7 +23,12 @@ def register_user(payload: UserRegister, db: Session = Depends(get_db)) -> Regis
             detail="User with this email already exists.",
         )
 
-    user = User(email=normalized_email, password=hash_password(payload.password))
+    hashed_password = hash_password(payload.password)
+    user = User(
+        email=normalized_email,
+        password=hashed_password,
+        password_hash=hashed_password,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -35,7 +40,8 @@ def register_user(payload: UserRegister, db: Session = Depends(get_db)) -> Regis
 def login_user(payload: UserLogin, db: Session = Depends(get_db)) -> TokenResponse:
     normalized_email = payload.email.strip().lower()
     user = db.query(User).filter(User.email == normalized_email).first()
-    if not user or not verify_password(payload.password, user.password):
+    stored_hash = user.password_hash or user.password
+    if not user or not stored_hash or not verify_password(payload.password, stored_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",

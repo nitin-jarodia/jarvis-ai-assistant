@@ -1,6 +1,8 @@
 'use strict';
 
-// ─── API Client ────────────────────────────────────────────────────────────────
+const MOBILE_BREAKPOINT = 960;
+const DEFAULT_INPUT_HINT =
+  'Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>📎</kbd> to analyze a document';
 
 const API = {
   base: '/api',
@@ -11,6 +13,7 @@ const API = {
 
     const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
+
     try {
       const url = options.rawPath ? path : `${this.base}${path}`;
       const res = await fetch(url, opts);
@@ -27,14 +30,12 @@ const API = {
       throw err;
     }
   },
-  get:    (path)        => API.request('GET', path),
-  post:   (path, body)  => API.request('POST', path, body),
-  patch:  (path, body)  => API.request('PATCH', path, body),
-  delete: (path)        => API.request('DELETE', path),
+  get: (path) => API.request('GET', path),
+  post: (path, body) => API.request('POST', path, body),
+  patch: (path, body) => API.request('PATCH', path, body),
+  delete: (path) => API.request('DELETE', path),
   postRaw: (path, body) => API.request('POST', path, body, { rawPath: true }),
-  getRaw:  (path)       => API.request('GET', path, null, { rawPath: true }),
-
-  /** Upload a file using multipart/form-data (no Content-Type override). */
+  getRaw: (path) => API.request('GET', path, null, { rawPath: true }),
   async upload(path, formData) {
     try {
       const headers = {};
@@ -54,85 +55,489 @@ const API = {
   },
 };
 
-// ─── State ─────────────────────────────────────────────────────────────────────
-
 const state = {
-  currentConversationId: null,
-  isLoading:             false,
-  editingNoteId:         null,
-  /** Active file: { id: string, name: string, meta?: string } | null */
-  activeFile:            null,
-  authToken:             localStorage.getItem('jarvis_auth_token'),
-  currentUserId:         localStorage.getItem('jarvis_user_id'),
+  currentUser: null,
+  chats: [],
+  activeChatId: null,
+  messages: [],
+  isLoading: false,
+  editingNoteId: null,
+  activeFile: null,
+  authToken: localStorage.getItem('jarvis_auth_token'),
+  currentUserId: localStorage.getItem('jarvis_user_id'),
+  sidebarOpen: false,
+  sidebarCollapsed: false,
+  shouldAutoScroll: true,
+  streamingMessageId: 0,
 };
-
-const DEFAULT_INPUT_HINT =
-  'Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>📎</kbd> to analyze a document';
-
-// ─── DOM Helpers ───────────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  authScreen:       $('authScreen'),
-  loginTabBtn:      $('loginTabBtn'),
-  signupTabBtn:     $('signupTabBtn'),
-  loginForm:        $('loginForm'),
-  signupForm:       $('signupForm'),
-  loginEmail:       $('loginEmail'),
-  loginPassword:    $('loginPassword'),
-  signupEmail:      $('signupEmail'),
-  signupPassword:   $('signupPassword'),
-  loginSubmitBtn:   $('loginSubmitBtn'),
-  signupSubmitBtn:  $('signupSubmitBtn'),
-  authMessage:      $('authMessage'),
-  authUserLabel:    $('authUserLabel'),
-  logoutBtn:        $('logoutBtn'),
-  messagesArea:     $('messagesArea'),
-  welcomeSplash:    $('welcomeSplash'),
-  messageInput:     $('messageInput'),
-  sendBtn:          $('sendBtn'),
-  micBtn:           $('micBtn'),
-  uploadBtn:        $('uploadBtn'),
-  fileInput:        $('fileInput'),
-  fileBadgeBar:     $('fileBadgeBar'),
-  fileBadge:        $('fileBadge'),
-  fileBadgeName:    $('fileBadgeName'),
-  fileBadgeMeta:    $('fileBadgeMeta'),
+  authScreen: $('authScreen'),
+  loginTabBtn: $('loginTabBtn'),
+  signupTabBtn: $('signupTabBtn'),
+  loginForm: $('loginForm'),
+  signupForm: $('signupForm'),
+  loginEmail: $('loginEmail'),
+  loginPassword: $('loginPassword'),
+  signupEmail: $('signupEmail'),
+  signupPassword: $('signupPassword'),
+  loginSubmitBtn: $('loginSubmitBtn'),
+  signupSubmitBtn: $('signupSubmitBtn'),
+  authMessage: $('authMessage'),
+  authUserLabel: $('authUserLabel'),
+  logoutBtn: $('logoutBtn'),
+  sidebar: $('sidebar'),
+  sidebarToggle: $('sidebarToggle'),
+  sidebarBackdrop: $('sidebarBackdrop'),
+  mobileMenuBtn: $('mobileMenuBtn'),
+  openHistoryBtn: $('openHistoryBtn'),
+  sidebarHistoryList: $('sidebarHistoryList'),
+  chatContainer: $('chatContainer'),
+  messagesArea: $('messagesArea'),
+  welcomeSplash: $('welcomeSplash'),
+  messageInput: $('messageInput'),
+  sendBtn: $('sendBtn'),
+  micBtn: $('micBtn'),
+  uploadBtn: $('uploadBtn'),
+  fileInput: $('fileInput'),
+  fileBadgeBar: $('fileBadgeBar'),
+  fileBadgeName: $('fileBadgeName'),
+  fileBadgeMeta: $('fileBadgeMeta'),
   fileBadgeDismiss: $('fileBadgeDismiss'),
-  fileModeChip:     $('fileModeChip'),
+  fileModeChip: $('fileModeChip'),
   fileModeChipName: $('fileModeChipName'),
-  chatTitle:        $('chatTitle'),
-  inputHint:        $('inputHint'),
-  statusText:       $('statusText'),
-  statusDot:        $('statusDot'),
-  newChatBtn:       $('newChatBtn'),
-  notesGrid:        $('notesGrid'),
-  noteEditor:       $('noteEditor'),
-  noteTitleInput:   $('noteTitleInput'),
+  chatTitle: $('chatTitle'),
+  inputHint: $('inputHint'),
+  statusText: $('statusText'),
+  statusDot: $('statusDot'),
+  newChatBtn: $('newChatBtn'),
+  notesGrid: $('notesGrid'),
+  noteEditor: $('noteEditor'),
+  noteTitleInput: $('noteTitleInput'),
   noteContentInput: $('noteContentInput'),
-  saveNoteBtn:      $('saveNoteBtn'),
-  cancelNoteBtn:    $('cancelNoteBtn'),
-  addNoteBtn:       $('addNoteBtn'),
-  historyList:      $('historyList'),
-  toastContainer:   $('toastContainer'),
+  saveNoteBtn: $('saveNoteBtn'),
+  cancelNoteBtn: $('cancelNoteBtn'),
+  addNoteBtn: $('addNoteBtn'),
+  historyList: $('historyList'),
+  toastContainer: $('toastContainer'),
 };
-
-// ─── Markdown Renderer (marked + DOMPurify) ────────────────────────────────────
 
 if (typeof marked !== 'undefined') {
   marked.setOptions({ gfm: true, breaks: true });
 }
 
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  return new Date(dateStr).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function formatMessageTime(date = new Date()) {
+  return new Date(date).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function getAgentMeta(agentType) {
+  const mapping = {
+    coding: { icon: '🧠', label: 'Coding Agent' },
+    research: { icon: '🔎', label: 'Research Agent' },
+    planning: { icon: '📊', label: 'Planner Agent' },
+    debugging: { icon: '🛠️', label: 'Debug Agent' },
+  };
+  return mapping[agentType] || null;
+}
+
 function renderMarkdown(content) {
-  if (typeof marked === 'undefined') return escapeHtml(content);
+  if (typeof marked === 'undefined') return escapeHtml(content).replace(/\n/g, '<br>');
   const raw = marked.parse(content);
   return typeof DOMPurify !== 'undefined'
     ? DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } })
     : raw;
 }
 
-// ─── Authentication ────────────────────────────────────────────────────────────
+function isMobileViewport() {
+  return window.innerWidth <= MOBILE_BREAKPOINT;
+}
+
+function isNearBottom(el, threshold = 120) {
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+function updateInputHint(content) {
+  if (els.inputHint) els.inputHint.innerHTML = content;
+}
+
+function showToast(msg, type = '') {
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`.trim();
+  toast.textContent = msg;
+  els.toastContainer.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 220ms ease';
+    setTimeout(() => toast.remove(), 260);
+  }, 3200);
+}
+
+const Sidebar = {
+  sync(forceDesktopOpen = false) {
+    if (isMobileViewport()) {
+      state.sidebarCollapsed = false;
+      if (!state.sidebarOpen) {
+        document.body.classList.remove('sidebar-open');
+        els.sidebarBackdrop.classList.remove('is-visible');
+      }
+      els.sidebar.classList.remove('is-collapsed');
+      return;
+    }
+
+    state.sidebarOpen = false;
+    document.body.classList.remove('sidebar-open');
+    els.sidebarBackdrop.classList.remove('is-visible');
+    els.sidebar.classList.toggle('is-collapsed', forceDesktopOpen ? false : state.sidebarCollapsed);
+  },
+  setMobileOpen(open) {
+    state.sidebarOpen = open;
+    document.body.classList.toggle('sidebar-open', open);
+    els.sidebarBackdrop.classList.toggle('is-visible', open);
+  },
+  toggle() {
+    if (isMobileViewport()) {
+      this.setMobileOpen(!state.sidebarOpen);
+      return;
+    }
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    els.sidebar.classList.toggle('is-collapsed', state.sidebarCollapsed);
+  },
+  closeOnMobile() {
+    if (isMobileViewport()) this.setMobileOpen(false);
+  },
+};
+
+const InputBar = {
+  setLoading(loading) {
+    state.isLoading = loading;
+    els.sendBtn.disabled = loading;
+    els.sendBtn.classList.toggle('is-loading', loading);
+  },
+  focus() {
+    els.messageInput.focus();
+  },
+};
+
+function avatarMarkup(role) {
+  if (role === 'user') {
+    return `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20 21a8 8 0 0 0-16 0"></path>
+        <circle cx="12" cy="7" r="4"></circle>
+      </svg>
+    `;
+  }
+
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"></path>
+    </svg>
+  `;
+}
+
+function attachSpeakButton(btn, content) {
+  let isSpeaking = false;
+
+  btn.addEventListener('click', () => {
+    if (!('speechSynthesis' in window)) {
+      showToast('Text-to-speech is not supported in this browser.', 'error');
+      return;
+    }
+
+    if (isSpeaking) {
+      window.speechSynthesis.cancel();
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(content);
+    utterance.onstart = () => {
+      isSpeaking = true;
+      btn.textContent = 'Stop';
+    };
+    utterance.onend = () => {
+      isSpeaking = false;
+      btn.textContent = 'Speak';
+    };
+    utterance.onerror = () => {
+      isSpeaking = false;
+      btn.textContent = 'Speak';
+    };
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+function enhanceRenderedContent(container) {
+  container.querySelectorAll('pre > code').forEach((codeEl) => {
+    if (codeEl.dataset.enhanced === '1') return;
+    codeEl.dataset.enhanced = '1';
+
+    const pre = codeEl.parentElement;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block';
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'code-block-toolbar';
+
+    const label = document.createElement('span');
+    label.className = 'code-block-label';
+    const langMatch = (codeEl.className || '').match(/language-([\w-]+)/);
+    label.textContent = (langMatch?.[1] || 'code').replace(/^\w/, (s) => s.toUpperCase());
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'code-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(codeEl.textContent || '');
+        copyBtn.classList.add('is-copied');
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => {
+          copyBtn.classList.remove('is-copied');
+          copyBtn.textContent = 'Copy';
+        }, 1400);
+      } catch {
+        showToast('Could not copy code block.', 'error');
+      }
+    });
+
+    toolbar.append(label, copyBtn);
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.append(toolbar, pre);
+
+    if (typeof hljs !== 'undefined') {
+      try {
+        hljs.highlightElement(codeEl);
+      } catch {
+        /* noop */
+      }
+    }
+  });
+}
+
+const MessageBubble = {
+  create(role, content, options = {}) {
+    const isUser = role === 'user';
+    const staggerIndex = options.staggerIndex ?? 0;
+    const root = document.createElement('div');
+    root.className = `message ${role} message-enter`;
+    root.dataset.role = role;
+    root.style.setProperty(
+      '--msg-delay',
+      window.JarvisMotion ? window.JarvisMotion.staggerDelay(staggerIndex) : `${staggerIndex * 45}ms`
+    );
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.innerHTML = avatarMarkup(role);
+
+    const stack = document.createElement('div');
+    stack.className = 'message-stack';
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    const agentMeta = !isUser ? getAgentMeta(options.agentType) : null;
+    meta.innerHTML = `
+      <span>${isUser ? 'You' : 'Jarvis'}</span>
+      ${agentMeta ? `<span class="agent-badge agent-badge--${options.agentType}">${agentMeta.icon} ${agentMeta.label}</span>` : ''}
+      <span>${options.timeLabel || formatMessageTime()}</span>
+    `;
+
+    const bubble = document.createElement('div');
+    bubble.className = `bubble${isUser ? '' : ' markdown-body'}`;
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'bubble-content';
+    bubble.appendChild(contentEl);
+
+    let cursor = null;
+    if (options.streaming) {
+      bubble.classList.add('streaming');
+      contentEl.textContent = options.initialContent || '';
+      cursor = document.createElement('span');
+      cursor.className = 'streaming-cursor';
+      bubble.appendChild(cursor);
+    } else if (isUser) {
+      contentEl.textContent = content;
+    } else {
+      contentEl.innerHTML = renderMarkdown(content);
+      enhanceRenderedContent(contentEl);
+    }
+
+    stack.append(meta, bubble);
+
+    let speakBtn = null;
+    if (!isUser && !options.streaming && !options.suppressActions) {
+      const actions = document.createElement('div');
+      actions.className = 'message-actions';
+      speakBtn = document.createElement('button');
+      speakBtn.className = 'speak-btn';
+      speakBtn.type = 'button';
+      speakBtn.textContent = 'Speak';
+      speakBtn.title = 'Play response';
+      attachSpeakButton(speakBtn, content);
+      actions.appendChild(speakBtn);
+      stack.appendChild(actions);
+    }
+
+    root.append(avatar, stack);
+    root._bubble = bubble;
+    root._contentEl = contentEl;
+    root._cursor = cursor;
+    root._speakBtn = speakBtn;
+    root._stack = stack;
+    return root;
+  },
+  finalizeStreaming(root, finalContent) {
+    const bubble = root._bubble;
+    const contentEl = root._contentEl;
+    if (!bubble || !contentEl) return;
+
+    bubble.classList.remove('streaming');
+    bubble.classList.add('markdown-body');
+    if (root._cursor) root._cursor.remove();
+    contentEl.innerHTML = renderMarkdown(finalContent);
+    enhanceRenderedContent(contentEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+    const speakBtn = document.createElement('button');
+    speakBtn.className = 'speak-btn';
+    speakBtn.type = 'button';
+    speakBtn.textContent = 'Speak';
+    attachSpeakButton(speakBtn, finalContent);
+    actions.appendChild(speakBtn);
+    root._stack.appendChild(actions);
+  },
+};
+
+const TypingIndicator = {
+  show() {
+    this.remove();
+    const bubble = MessageBubble.create('assistant', '', { streaming: false, suppressActions: true });
+    bubble.id = 'typingIndicator';
+    bubble.classList.add('typing-bubble');
+    bubble._contentEl.innerHTML = `
+      <span class="typing-dot"></span>
+      <span class="typing-dot"></span>
+      <span class="typing-dot"></span>
+    `;
+    bubble._bubble.classList.remove('markdown-body');
+    els.messagesArea.appendChild(bubble);
+    ChatContainer.scrollToBottom(true);
+  },
+  remove() {
+    const el = $('typingIndicator');
+    if (el) el.remove();
+  },
+};
+
+const ChatContainer = {
+  reset({ showSplash = true } = {}) {
+    TypingIndicator.remove();
+    els.messagesArea.innerHTML = '';
+    els.messagesArea.appendChild(els.welcomeSplash);
+    els.welcomeSplash.style.display = showSplash ? '' : 'none';
+    state.shouldAutoScroll = true;
+  },
+  hideSplash() {
+    if (els.welcomeSplash) els.welcomeSplash.style.display = 'none';
+  },
+  append(role, content, options = {}) {
+    if (!options.keepSplashHidden) this.hideSplash();
+    const messageEl = MessageBubble.create(role, content, options);
+    els.messagesArea.appendChild(messageEl);
+    if (options.forceScroll !== false) {
+      this.scrollToBottom(true);
+    }
+    return messageEl;
+  },
+  scrollToBottom(force = false) {
+    if (force || state.shouldAutoScroll) {
+      els.messagesArea.scrollTop = els.messagesArea.scrollHeight;
+    }
+  },
+  async streamAssistant(content, options = {}) {
+    this.hideSplash();
+    const messageEl = MessageBubble.create('assistant', '', {
+      streaming: true,
+      agentType: options.agentType,
+    });
+    els.messagesArea.appendChild(messageEl);
+    this.scrollToBottom(true);
+
+    const contentEl = messageEl._contentEl;
+    const reduced = window.JarvisMotion?.prefersReducedMotion?.() ?? false;
+    const parts = content.split(/(\s+)/).filter(Boolean);
+
+    if (reduced || parts.length <= 3) {
+      contentEl.textContent = content;
+      MessageBubble.finalizeStreaming(messageEl, content);
+      this.scrollToBottom(true);
+      return messageEl;
+    }
+
+    let index = 0;
+    let rendered = '';
+    const streamId = ++state.streamingMessageId;
+
+    await new Promise((resolve) => {
+      const tick = () => {
+        if (state.streamingMessageId !== streamId) {
+          resolve();
+          return;
+        }
+
+        const nextChunk = [];
+        let chunkCount = 0;
+        while (index < parts.length && chunkCount < 3) {
+          nextChunk.push(parts[index]);
+          if (!/^\s+$/.test(parts[index])) chunkCount += 1;
+          index += 1;
+        }
+
+        rendered += nextChunk.join('');
+        contentEl.textContent = rendered;
+        ChatContainer.scrollToBottom();
+
+        if (index >= parts.length) {
+          resolve();
+          return;
+        }
+
+        setTimeout(tick, 18 + Math.min(44, nextChunk.join('').length * 2));
+      };
+
+      tick();
+    });
+
+    contentEl.textContent = content;
+    MessageBubble.finalizeStreaming(messageEl, content);
+    this.scrollToBottom(true);
+    return messageEl;
+  },
+};
 
 function setAuthMode(mode) {
   const isLogin = mode === 'login';
@@ -156,18 +561,13 @@ function setAuthMessage(message, type = '') {
 function setAuthState(token, userId) {
   state.authToken = token || null;
   state.currentUserId = userId == null ? null : String(userId);
+  state.currentUser = state.currentUserId ? { id: state.currentUserId } : null;
 
-  if (state.authToken) {
-    localStorage.setItem('jarvis_auth_token', state.authToken);
-  } else {
-    localStorage.removeItem('jarvis_auth_token');
-  }
+  if (state.authToken) localStorage.setItem('jarvis_auth_token', state.authToken);
+  else localStorage.removeItem('jarvis_auth_token');
 
-  if (state.currentUserId) {
-    localStorage.setItem('jarvis_user_id', state.currentUserId);
-  } else {
-    localStorage.removeItem('jarvis_user_id');
-  }
+  if (state.currentUserId) localStorage.setItem('jarvis_user_id', state.currentUserId);
+  else localStorage.removeItem('jarvis_user_id');
 
   updateAuthUi();
 }
@@ -175,25 +575,67 @@ function setAuthState(token, userId) {
 function updateAuthUi() {
   const authenticated = Boolean(state.authToken && state.currentUserId);
   els.authScreen.classList.toggle('hidden', authenticated);
-  els.authUserLabel.textContent = authenticated
-    ? `User #${state.currentUserId}`
-    : 'Not authenticated';
+  els.authUserLabel.textContent = authenticated ? `User #${state.currentUserId}` : 'Not authenticated';
   els.logoutBtn.disabled = !authenticated;
 }
 
 function resetAppState() {
-  state.currentConversationId = null;
+  state.chats = [];
+  state.activeChatId = null;
+  state.messages = [];
   state.isLoading = false;
   state.editingNoteId = null;
   clearActiveFile();
   els.chatTitle.textContent = 'New Conversation';
   delete els.chatTitle.dataset.set;
-  els.messagesArea.innerHTML = '';
-  els.messagesArea.appendChild(els.welcomeSplash);
-  els.welcomeSplash.style.display = '';
+  ChatContainer.reset({ showSplash: true });
   els.noteEditor.classList.add('hidden');
   els.noteTitleInput.value = '';
   els.noteContentInput.value = '';
+  renderSidebarHistory([]);
+  renderHistory([]);
+}
+
+function getActiveChat() {
+  return state.chats.find((chat) => chat.id === state.activeChatId) || null;
+}
+
+function updateChatHeader(chat = getActiveChat()) {
+  if (!chat) {
+    els.chatTitle.textContent = state.activeFile ? 'New Document Chat' : 'New Conversation';
+    delete els.chatTitle.dataset.set;
+    return;
+  }
+
+  els.chatTitle.textContent = chat.title || 'New Chat';
+  if (chat.title && chat.title !== 'New Chat') {
+    els.chatTitle.dataset.set = '1';
+  } else {
+    delete els.chatTitle.dataset.set;
+  }
+}
+
+function renderActiveMessages() {
+  ChatContainer.reset({ showSplash: state.messages.length === 0 });
+  if (!state.messages.length) {
+    updateChatHeader();
+    return;
+  }
+
+  ChatContainer.hideSplash();
+  const fragment = document.createDocumentFragment();
+  state.messages.forEach((message, index) => {
+    fragment.appendChild(
+      MessageBubble.create(message.role, message.content, {
+        staggerIndex: index,
+        timeLabel: formatMessageTime(message.created_at),
+        agentType: message.agent_type,
+      })
+    );
+  });
+  els.messagesArea.appendChild(fragment);
+  ChatContainer.scrollToBottom(true);
+  updateChatHeader();
 }
 
 async function verifyStoredSession() {
@@ -224,22 +666,22 @@ async function handleLogin(event) {
 
   els.loginSubmitBtn.disabled = true;
   setAuthMessage('Logging you in...');
+
   try {
     const loginData = await API.postRaw('/login', { email, password });
-    const protectedData = await API.request(
-      'GET',
-      '/protected',
-      null,
-      {
-        rawPath: true,
-        headers: { Authorization: `Bearer ${loginData.access_token}` },
-      }
-    );
+    const protectedData = await API.request('GET', '/protected', null, {
+      rawPath: true,
+      headers: { Authorization: `Bearer ${loginData.access_token}` },
+    });
+
     setAuthState(loginData.access_token, protectedData.user_id);
     setAuthMessage('Login successful.', 'success');
     els.loginForm.reset();
     showToast(`Logged in as user #${protectedData.user_id}.`, 'success');
-    els.messageInput.focus();
+    await refreshConversationLists().catch(() => {
+      showToast('Logged in, but conversation history could not be loaded yet.', 'error');
+    });
+    InputBar.focus();
   } catch (err) {
     setAuthState(null, null);
     setAuthMessage(err.message || 'Login failed.', 'error');
@@ -259,23 +701,23 @@ async function handleSignup(event) {
 
   els.signupSubmitBtn.disabled = true;
   setAuthMessage('Creating your account...');
+
   try {
     await API.postRaw('/register', { email, password });
     setAuthMessage('Account created. Logging you in now...', 'success');
     const loginData = await API.postRaw('/login', { email, password });
-    const protectedData = await API.request(
-      'GET',
-      '/protected',
-      null,
-      {
-        rawPath: true,
-        headers: { Authorization: `Bearer ${loginData.access_token}` },
-      }
-    );
+    const protectedData = await API.request('GET', '/protected', null, {
+      rawPath: true,
+      headers: { Authorization: `Bearer ${loginData.access_token}` },
+    });
+
     setAuthState(loginData.access_token, protectedData.user_id);
     els.signupForm.reset();
     showToast('Account created and logged in.', 'success');
-    els.messageInput.focus();
+    await refreshConversationLists().catch(() => {
+      showToast('Account created, but conversation history could not be loaded yet.', 'error');
+    });
+    InputBar.focus();
   } catch (err) {
     setAuthState(null, null);
     setAuthMessage(err.message || 'Sign up failed.', 'error');
@@ -285,6 +727,7 @@ async function handleSignup(event) {
 }
 
 function handleLogout() {
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   setAuthState(null, null);
   resetAppState();
   switchTab('chat');
@@ -293,33 +736,522 @@ function handleLogout() {
   showToast('Logged out.', 'success');
 }
 
+function switchTab(tabName) {
+  ['Chat', 'Notes', 'History'].forEach((name) => {
+    const panel = $(`tab${name}`);
+    const active = name.toLowerCase() === tabName;
+    panel.classList.toggle('tab-panel--active', active);
+    panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+  });
+
+  document.querySelectorAll('.nav-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.tab === tabName);
+  });
+
+  if (tabName === 'notes') loadNotes();
+  if (tabName === 'history') loadHistory();
+}
+
+function setActiveFile(file) {
+  state.activeFile = file;
+  els.fileBadgeName.textContent = file.name;
+  els.fileBadgeMeta.textContent = file.meta || 'Document ready';
+  els.fileBadgeBar.classList.remove('hidden');
+  els.fileModeChipName.textContent = file.name;
+  els.fileModeChip.classList.remove('hidden');
+  els.messageInput.placeholder = `Ask about "${file.name}"…`;
+  els.uploadBtn.classList.add('active');
+  updateInputHint('Document mode active. Answers will use the uploaded file.');
+}
+
+function clearActiveFile() {
+  state.activeFile = null;
+  els.fileBadgeBar.classList.add('hidden');
+  els.fileModeChip.classList.add('hidden');
+  els.messageInput.placeholder = 'Message Jarvis...';
+  els.uploadBtn.classList.remove('active');
+  updateInputHint(DEFAULT_INPUT_HINT);
+}
+
+function startDocumentChat(filename) {
+  state.activeChatId = null;
+  state.messages = [];
+  updateChatHeader(null);
+  ChatContainer.reset({ showSplash: true });
+  switchTab('chat');
+}
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const recognition = SpeechRecognition ? new SpeechRecognition() : null;
+
+function startListening() {
+  if (!recognition) {
+    showToast('Speech recognition is not supported in this browser.', 'error');
+    return;
+  }
+
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    els.messageInput.placeholder = 'Listening…';
+    els.micBtn.classList.add('is-listening');
+  };
+
+  recognition.onspeechend = () => recognition.stop();
+
+  recognition.onend = () => {
+    els.messageInput.placeholder = state.activeFile
+      ? `Ask about "${state.activeFile.name}"…`
+      : 'Message Jarvis...';
+    els.micBtn.classList.remove('is-listening');
+  };
+
+  recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript.trim();
+    if (!transcript) {
+      showToast('Empty input. Please speak clearly.', 'error');
+      return;
+    }
+    els.messageInput.value = transcript;
+    autoResizeTextarea();
+    sendMessage();
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+      showToast('Microphone access denied. Please allow permissions.', 'error');
+    } else if (event.error === 'no-speech') {
+      showToast('No speech detected. Please try again.', 'error');
+    } else {
+      showToast(`Microphone error: ${event.error}`, 'error');
+    }
+  };
+
+  try {
+    recognition.start();
+  } catch {
+    showToast('Failed to start microphone.', 'error');
+  }
+}
+
+function autoResizeTextarea() {
+  const ta = els.messageInput;
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
+}
+
+async function sendMessage() {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to chat with Jarvis.', 'error');
+    return;
+  }
+
+  const content = els.messageInput.value.trim();
+  if (!content || state.isLoading) return;
+
+  ChatContainer.hideSplash();
+  InputBar.setLoading(true);
+  els.messageInput.value = '';
+  autoResizeTextarea();
+  let chatId = state.activeChatId;
+  const optimisticMessage = {
+    id: `temp-user-${Date.now()}`,
+    chat_id: chatId,
+    role: 'user',
+    content,
+    created_at: new Date().toISOString(),
+  };
+
+  try {
+    if (!chatId) {
+      const newChat = await createNewChat({
+        clearFile: false,
+        focus: false,
+        switchToChat: false,
+        silent: true,
+        throwOnError: true,
+      });
+      chatId = newChat.id;
+    }
+
+    optimisticMessage.chat_id = chatId;
+    state.messages.push(optimisticMessage);
+    ChatContainer.append('user', content);
+    TypingIndicator.show();
+    updateInputHint(state.activeFile ? 'Searching document...' : 'Jarvis is thinking...');
+
+    const payload = { content };
+    if (state.activeFile) payload.file_id = state.activeFile.id;
+
+    const data = await API.post(`/chat/${chatId}/message`, payload);
+    state.activeChatId = data.chat_id;
+    state.messages[state.messages.length - 1].id = data.user_message_id;
+
+    TypingIndicator.remove();
+    state.messages.push({
+      id: data.assistant_message_id,
+      chat_id: data.chat_id,
+      role: 'assistant',
+      agent_type: data.agent_type,
+      content: data.reply,
+      created_at: new Date().toISOString(),
+    });
+    await ChatContainer.streamAssistant(data.reply, { agentType: data.agent_type });
+    await refreshConversationLists().catch(() => {});
+    updateChatHeader();
+  } catch (err) {
+    TypingIndicator.remove();
+    if (state.messages[state.messages.length - 1]?.id === optimisticMessage.id) {
+      state.messages.pop();
+      renderActiveMessages();
+    }
+    els.messageInput.value = content;
+    autoResizeTextarea();
+    showToast(err.message || 'Failed to send message.', 'error');
+  } finally {
+    InputBar.setLoading(false);
+    updateInputHint(state.activeFile ? 'Document mode active. Answers will use the uploaded file.' : DEFAULT_INPUT_HINT);
+    InputBar.focus();
+  }
+}
+
+async function createNewChat(options = {}) {
+  const {
+    clearFile = false,
+    focus = true,
+    switchToChat = true,
+    silent = false,
+    throwOnError = false,
+  } = options;
+
+  try {
+    const chat = await API.post('/chat/create', { title: 'New Chat' });
+    state.activeChatId = chat.id;
+    state.messages = [];
+    if (clearFile) clearActiveFile();
+    state.chats = [chat, ...state.chats.filter((entry) => entry.id !== chat.id)];
+    renderSidebarHistory(state.chats);
+    renderHistory(state.chats);
+    renderActiveMessages();
+    if (switchToChat) switchTab('chat');
+    Sidebar.closeOnMobile();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    if (focus) InputBar.focus();
+    return chat;
+  } catch (err) {
+    if (!silent) showToast(err.message || 'Failed to create chat.', 'error');
+    if (throwOnError) throw err;
+    return null;
+  }
+}
+
+async function startNewChat() {
+  await createNewChat({ clearFile: true });
+}
+
+function renderSidebarHistory(convos) {
+  const previousScroll = els.sidebarHistoryList.scrollTop;
+
+  if (!convos.length) {
+    els.sidebarHistoryList.innerHTML = `
+      <div class="sidebar-empty-state">
+        <span>Conversations will appear here.</span>
+      </div>
+    `;
+    return;
+  }
+
+  els.sidebarHistoryList.innerHTML = convos
+    .slice(0, 12)
+    .map((c) => `
+      <button class="sidebar-history-item${state.activeChatId === c.id ? ' active' : ''}" data-id="${c.id}" type="button">
+        <span class="sidebar-history-title">${escapeHtml(c.title || 'Untitled conversation')}</span>
+        <span class="sidebar-history-date">${formatDate(c.created_at)}</span>
+      </button>
+    `)
+    .join('');
+
+  els.sidebarHistoryList.querySelectorAll('.sidebar-history-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      loadConversation(item.dataset.id);
+    });
+  });
+
+  els.sidebarHistoryList.scrollTop = previousScroll;
+}
+
+function renderHistory(convos) {
+  const previousScroll = els.historyList.scrollTop;
+
+  if (!convos.length) {
+    els.historyList.innerHTML = `<div class="empty-state"><span>🕑</span><p>No conversations yet. Start chatting!</p></div>`;
+    return;
+  }
+
+  els.historyList.innerHTML = convos
+    .map((c) => `
+      <div class="history-item" data-id="${c.id}">
+        <div class="history-item-info">
+          <h4>${escapeHtml(c.title || 'Untitled conversation')}</h4>
+          <span>${formatDate(c.created_at)}</span>
+        </div>
+        <div class="history-item-actions">
+          <button class="note-action-btn delete-convo" data-id="${c.id}" type="button">Delete</button>
+        </div>
+      </div>
+    `)
+    .join('');
+
+  els.historyList.querySelectorAll('.history-item').forEach((item) => {
+    item.addEventListener('click', (event) => {
+      if (event.target.closest('.delete-convo')) return;
+      loadConversation(item.dataset.id);
+    });
+  });
+
+  els.historyList.querySelectorAll('.delete-convo').forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      await deleteConversation(btn.dataset.id);
+    });
+  });
+
+  els.historyList.scrollTop = previousScroll;
+}
+
+async function refreshConversationLists() {
+  if (!state.authToken) {
+    state.chats = [];
+    renderSidebarHistory([]);
+    renderHistory([]);
+    return;
+  }
+
+  state.chats = await API.get('/chats');
+  if (state.activeChatId && !state.chats.some((chat) => chat.id === state.activeChatId)) {
+    state.activeChatId = null;
+    state.messages = [];
+    clearActiveFile();
+    renderActiveMessages();
+  }
+  renderSidebarHistory(state.chats);
+  renderHistory(state.chats);
+  updateChatHeader();
+}
+
+async function loadHistory() {
+  if (!state.authToken) return;
+  els.historyList.innerHTML = historySkeletonHtml();
+  try {
+    await refreshConversationLists();
+  } catch {
+    els.historyList.innerHTML = `<div class="empty-state"><span>🕑</span><p>Could not load history.</p></div>`;
+    showToast('Failed to load history.', 'error');
+  }
+}
+
+async function loadConversation(id) {
+  if (!state.authToken) return;
+
+  try {
+    const chatId = parseInt(id, 10);
+    state.activeChatId = chatId;
+    if (!state.chats.some((chat) => chat.id === chatId)) {
+      await refreshConversationLists();
+    }
+
+    const chat = state.chats.find((entry) => entry.id === chatId) || null;
+    state.messages = await API.get(`/chat/${chatId}`);
+
+    if (chat?.document_file_id) {
+      setActiveFile({
+        id: chat.document_file_id,
+        name: chat.document_filename || 'Document',
+        meta: 'Document chat',
+      });
+    } else {
+      clearActiveFile();
+    }
+
+    renderActiveMessages();
+    switchTab('chat');
+    Sidebar.closeOnMobile();
+    renderSidebarHistory(state.chats);
+    renderHistory(state.chats);
+  } catch {
+    showToast('Failed to load conversation.', 'error');
+  }
+}
+
+async function deleteConversation(id) {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to access conversations.', 'error');
+    return;
+  }
+
+  if (!confirm('Delete this chat?')) return;
+
+  try {
+    const chatId = parseInt(id, 10);
+    await API.delete(`/chat/${chatId}`);
+    state.chats = state.chats.filter((chat) => chat.id !== chatId);
+    if (state.activeChatId === chatId) {
+      state.activeChatId = null;
+      state.messages = [];
+      clearActiveFile();
+      renderActiveMessages();
+    }
+    renderSidebarHistory(state.chats);
+    renderHistory(state.chats);
+    showToast('Chat deleted.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Failed to delete chat.', 'error');
+  }
+}
+
+async function loadNotes() {
+  if (!state.authToken) return;
+  els.notesGrid.innerHTML = notesSkeletonHtml();
+
+  try {
+    const notes = await API.get('/notes');
+    renderNotes(notes);
+  } catch {
+    els.notesGrid.innerHTML = `<div class="empty-state"><span>📝</span><p>Could not load notes.</p></div>`;
+    showToast('Failed to load notes.', 'error');
+  }
+}
+
+function renderNotes(notes) {
+  if (!notes.length) {
+    els.notesGrid.innerHTML = `<div class="empty-state"><span>📝</span><p>No notes yet. Create your first note!</p></div>`;
+    return;
+  }
+
+  els.notesGrid.innerHTML = notes
+    .map((note) => `
+      <div class="note-card" data-id="${note.id}">
+        <h3>${escapeHtml(note.title)}</h3>
+        <p>${escapeHtml(note.content)}</p>
+        <div class="note-card-meta">
+          <span>${formatDate(note.created_at)}</span>
+          <div class="note-actions">
+            <button class="note-action-btn edit-note" data-id="${note.id}" type="button">Edit</button>
+            <button class="note-action-btn delete-note" data-id="${note.id}" type="button">Delete</button>
+          </div>
+        </div>
+      </div>
+    `)
+    .join('');
+
+  els.notesGrid.querySelectorAll('.edit-note').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openEditNote(btn.dataset.id, notes);
+    });
+  });
+
+  els.notesGrid.querySelectorAll('.delete-note').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteNote(btn.dataset.id);
+    });
+  });
+}
+
+function openEditor(title = '', content = '', noteId = null) {
+  state.editingNoteId = noteId;
+  els.noteTitleInput.value = title;
+  els.noteContentInput.value = content;
+  els.noteEditor.classList.remove('hidden');
+  els.noteTitleInput.focus();
+}
+
+function openEditNote(id, notes) {
+  const note = notes.find((entry) => entry.id === parseInt(id, 10));
+  if (note) openEditor(note.title, note.content, note.id);
+}
+
+async function deleteNote(id) {
+  if (!state.authToken) {
+    updateAuthUi();
+    setAuthMessage('Please log in to manage notes.', 'error');
+    return;
+  }
+
+  if (!confirm('Delete this note?')) return;
+
+  try {
+    await API.delete(`/notes/${id}`);
+    showToast('Note deleted.', 'success');
+    await loadNotes();
+  } catch (err) {
+    showToast(err.message || 'Failed to delete note.', 'error');
+  }
+}
+
+async function checkHealth() {
+  try {
+    const data = await API.get('/health');
+    const aiOk = data?.ai_service?.status === 'ok';
+    els.statusDot.classList.remove('status-offline');
+    els.statusDot.classList.toggle('status-online', aiOk);
+    els.statusDot.classList.toggle('status-ai-error', !aiOk);
+    els.statusText.textContent = aiOk ? 'Online' : 'AI Error';
+  } catch {
+    els.statusDot.classList.remove('status-online', 'status-ai-error');
+    els.statusDot.classList.add('status-offline');
+    els.statusText.textContent = 'Offline';
+  }
+}
+
+function notesSkeletonHtml() {
+  const card = `
+    <div class="skeleton-card" aria-hidden="true">
+      <div class="skeleton skeleton-line"></div>
+      <div class="skeleton skeleton-line"></div>
+      <div class="skeleton skeleton-line" style="width:55%"></div>
+    </div>
+  `;
+  return card.repeat(4);
+}
+
+function historySkeletonHtml() {
+  const row = `
+    <div class="skeleton-row" aria-hidden="true">
+      <div class="skeleton skeleton-line" style="width:72%"></div>
+      <div class="skeleton skeleton-line" style="width:38%"></div>
+    </div>
+  `;
+  return row.repeat(6);
+}
+
 els.loginTabBtn.addEventListener('click', () => setAuthMode('login'));
 els.signupTabBtn.addEventListener('click', () => setAuthMode('signup'));
 els.loginForm.addEventListener('submit', handleLogin);
 els.signupForm.addEventListener('submit', handleSignup);
 els.logoutBtn.addEventListener('click', handleLogout);
 
-// ─── Tab Navigation ────────────────────────────────────────────────────────────
-
-function switchTab(tabName) {
-  ['Chat', 'Notes', 'History'].forEach((t) => {
-    $(`tab${t}`).classList.toggle('hidden', t.toLowerCase() !== tabName);
-  });
-  document.querySelectorAll('.nav-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.tab === tabName);
-  });
-  if (tabName === 'notes')   loadNotes();
-  if (tabName === 'history') loadHistory();
-}
-
 document.querySelectorAll('.nav-btn').forEach((btn) => {
-  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  btn.addEventListener('click', () => {
+    switchTab(btn.dataset.tab);
+    Sidebar.closeOnMobile();
+  });
 });
 
-// ─── File Upload ───────────────────────────────────────────────────────────────
+els.sidebarToggle.addEventListener('click', () => Sidebar.toggle());
+els.mobileMenuBtn.addEventListener('click', () => Sidebar.setMobileOpen(true));
+els.sidebarBackdrop.addEventListener('click', () => Sidebar.setMobileOpen(false));
+els.openHistoryBtn.addEventListener('click', () => {
+  switchTab('history');
+  Sidebar.closeOnMobile();
+});
 
 els.uploadBtn.addEventListener('click', () => els.fileInput.click());
-
 els.fileInput.addEventListener('change', async () => {
   if (!state.authToken) {
     els.fileInput.value = '';
@@ -330,8 +1262,6 @@ els.fileInput.addEventListener('change', async () => {
 
   const file = els.fileInput.files[0];
   if (!file) return;
-
-  // Reset input so re-selecting same file fires the event
   els.fileInput.value = '';
 
   const ext = file.name.split('.').pop().toLowerCase();
@@ -340,21 +1270,21 @@ els.fileInput.addEventListener('change', async () => {
     return;
   }
 
-  const MAX_MB = 10;
-  if (file.size > MAX_MB * 1024 * 1024) {
-    showToast(`File too large (max ${MAX_MB} MB).`, 'error');
+  const maxMb = 10;
+  if (file.size > maxMb * 1024 * 1024) {
+    showToast(`File too large (max ${maxMb} MB).`, 'error');
     return;
   }
 
   els.uploadBtn.classList.add('uploading');
   els.uploadBtn.title = 'Uploading…';
   updateInputHint('Analyzing document...');
-  showToast('Analyzing document...', '');
+  showToast('Analyzing document...');
 
   try {
-    const fd = new FormData();
-    fd.append('file', file);
-    const data = await API.upload('/upload', fd);
+    const formData = new FormData();
+    formData.append('file', file);
+    const data = await API.upload('/upload', formData);
     setActiveFile({
       id: data.file_id,
       name: data.filename,
@@ -371,321 +1301,34 @@ els.fileInput.addEventListener('change', async () => {
   }
 });
 
-function setActiveFile(file) {
-  state.activeFile = file;
-
-  els.fileBadgeName.textContent = file.name;
-  els.fileBadgeMeta.textContent = file.meta || 'Document ready';
-  els.fileBadgeBar.classList.remove('hidden');
-
-  els.fileModeChipName.textContent = file.name;
-  els.fileModeChip.classList.remove('hidden');
-
-  els.messageInput.placeholder = `Ask about "${file.name}"…`;
-  els.uploadBtn.classList.add('active');
-  updateInputHint('Document mode active. Answers will use the uploaded file.');
-}
-
-function clearActiveFile() {
-  state.activeFile = null;
-
-  els.fileBadgeBar.classList.add('hidden');
-  els.fileModeChip.classList.add('hidden');
-  els.messageInput.placeholder = 'Message Jarvis...';
-  els.uploadBtn.classList.remove('active');
-  updateInputHint(DEFAULT_INPUT_HINT);
-}
-
 els.fileBadgeDismiss.addEventListener('click', () => {
   clearActiveFile();
-  showToast('Document removed. Back to normal chat.', '');
+  showToast('Document removed. Back to normal chat.');
 });
-
-function startDocumentChat(filename) {
-  state.currentConversationId = null;
-  els.chatTitle.textContent = filename;
-  delete els.chatTitle.dataset.set;
-  els.messagesArea.innerHTML = '';
-  hideSplash();
-  els.messagesArea.appendChild(
-    createMessageEl('assistant', `Document ready. Ask a question about "${filename}".`)
-  );
-  scrollBottom();
-}
-
-// ─── Speech Recognition ────────────────────────────────────────────────────────
-
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-const recognition = SpeechRecognition ? new SpeechRecognition() : null;
-
-function startListening() {
-  if (!recognition) {
-    showToast('Speech recognition is not supported in this browser.', 'error');
-    return;
-  }
-  recognition.lang = 'en-US';
-  recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
-
-  recognition.onstart = () => {
-    els.messageInput.placeholder = 'Listening…';
-    if (els.micBtn) els.micBtn.classList.add('is-listening');
-  };
-  recognition.onspeechend = () => recognition.stop();
-  recognition.onend = () => {
-    els.messageInput.placeholder = state.activeFile
-      ? `Ask about "${state.activeFile.name}"…`
-      : 'Message Jarvis...';
-    if (els.micBtn) els.micBtn.classList.remove('is-listening');
-  };
-  recognition.onresult = (event) => {
-    const transcript = event.results[0][0].transcript.trim();
-    if (transcript) {
-      els.messageInput.value = transcript;
-      autoResizeTextarea();
-      sendMessage();
-    } else {
-      showToast('Empty input. Please speak clearly.', 'error');
-    }
-  };
-  recognition.onerror = (event) => {
-    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-      showToast('Microphone access denied. Please allow permissions.', 'error');
-    } else if (event.error === 'no-speech') {
-      showToast('No speech detected. Please try again.', 'error');
-    } else {
-      showToast('Microphone error: ' + event.error, 'error');
-    }
-  };
-  try { recognition.start(); } catch { showToast('Failed to start microphone.', 'error'); }
-}
 
 if (els.micBtn) els.micBtn.addEventListener('click', startListening);
 
-// ─── Text-to-Speech (per-message) ─────────────────────────────────────────────
-
-function attachSpeakButton(btn, content) {
-  let isSpeaking = false;
-  btn.addEventListener('click', () => {
-    if (!('speechSynthesis' in window)) {
-      showToast('Text-to-speech is not supported in this browser.', 'error');
-      return;
-    }
-    if (isSpeaking) { window.speechSynthesis.cancel(); return; }
-    const utter = new SpeechSynthesisUtterance(content);
-    utter.onstart = () => { isSpeaking = true;  btn.innerHTML = '⛔ Stop'; };
-    utter.onend   = () => { isSpeaking = false; btn.innerHTML = '🔊 Speak'; };
-    utter.onerror = () => { isSpeaking = false; btn.innerHTML = '🔊 Speak'; };
-    window.speechSynthesis.speak(utter);
-  });
-}
-
-// ─── Chat Messages ─────────────────────────────────────────────────────────────
-
-function createMessageEl(role, content) {
-  const isUser = role === 'user';
-  const div = document.createElement('div');
-  div.className = `message ${role}`;
-
-  const bubbleDiv = document.createElement('div');
-  bubbleDiv.className = `bubble${isUser ? '' : ' markdown-body'}`;
-  if (isUser) {
-    bubbleDiv.textContent = content;
-  } else {
-    bubbleDiv.innerHTML = renderMarkdown(content);
-  }
-
-  const avatarDiv = document.createElement('div');
-  avatarDiv.className = 'avatar';
-  avatarDiv.textContent = isUser ? '👤' : '⚡';
-
-  const wrapperDiv = document.createElement('div');
-  wrapperDiv.className = 'message-stack';
-  wrapperDiv.appendChild(bubbleDiv);
-
-  if (!isUser) {
-    const speakBtn = document.createElement('button');
-    speakBtn.className = 'speak-btn';
-    speakBtn.title = 'Play / Stop';
-    speakBtn.innerHTML = '🔊 Speak';
-    wrapperDiv.appendChild(speakBtn);
-    attachSpeakButton(speakBtn, content);
-  }
-
-  div.appendChild(avatarDiv);
-  div.appendChild(wrapperDiv);
-  return div;
-}
-
-function showTyping() {
-  const div = document.createElement('div');
-  div.className = 'message assistant typing-bubble';
-  div.id = 'typingIndicator';
-  div.innerHTML = `
-    <div class="avatar">⚡</div>
-    <div class="bubble">
-      <span class="typing-dot"></span>
-      <span class="typing-dot"></span>
-      <span class="typing-dot"></span>
-    </div>
-  `;
-  els.messagesArea.appendChild(div);
-  scrollBottom();
-}
-
-function removeTyping() {
-  const el = $('typingIndicator');
-  if (el) el.remove();
-}
-
-function scrollBottom() { els.messagesArea.scrollTop = els.messagesArea.scrollHeight; }
-function hideSplash()   { if (els.welcomeSplash) els.welcomeSplash.style.display = 'none'; }
-
-// ─── Send Message ─────────────────────────────────────────────────────────────
-
-async function sendMessage() {
-  if (!state.authToken) {
-    updateAuthUi();
-    setAuthMessage('Please log in to chat with Jarvis.', 'error');
-    return;
-  }
-
-  const content = els.messageInput.value.trim();
-  if (!content || state.isLoading) return;
-
-  hideSplash();
-  state.isLoading = true;
-  els.sendBtn.disabled = true;
-  els.messageInput.value = '';
-  autoResizeTextarea();
-
-  const userMsgEl = createMessageEl('user', content);
-  els.messagesArea.appendChild(userMsgEl);
-  scrollBottom();
-  showTyping();
-  updateInputHint(state.activeFile ? 'Searching document...' : DEFAULT_INPUT_HINT);
-
-  try {
-    let data;
-
-    if (state.activeFile) {
-      // ── File Chat Mode ─────────────────────────────────────────────────────
-      data = await API.post('/file-chat', {
-        query:           content,
-        file_id:         state.activeFile.id,
-        conversation_id: state.currentConversationId || undefined,
-      });
-    } else {
-      // ── Normal Chat Mode ───────────────────────────────────────────────────
-      data = await API.post('/chat', {
-        message:         content,
-        conversation_id: state.currentConversationId || undefined,
-      });
-    }
-
-    state.currentConversationId = data.conversation_id;
-    removeTyping();
-    els.messagesArea.appendChild(createMessageEl('assistant', data.reply));
-    scrollBottom();
-
-    if (!els.chatTitle.dataset.set) {
-      const prefix = state.activeFile ? `📄 ` : '';
-      els.chatTitle.textContent = prefix + content.substring(0, 42) + (content.length > 42 ? '…' : '');
-      els.chatTitle.dataset.set = '1';
-    }
-  } catch (err) {
-    removeTyping();
-    if (userMsgEl && userMsgEl.parentNode) userMsgEl.parentNode.removeChild(userMsgEl);
-    els.messageInput.value = content;
-    showToast(err.message || 'Failed to send message.', 'error');
-  } finally {
-    state.isLoading = false;
-    els.sendBtn.disabled = false;
-    updateInputHint(state.activeFile ? 'Document mode active. Answers will use the uploaded file.' : DEFAULT_INPUT_HINT);
-    els.messageInput.focus();
-  }
-}
-
 els.sendBtn.addEventListener('click', sendMessage);
-els.messageInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+els.messageInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendMessage();
+  }
 });
-
-function autoResizeTextarea() {
-  const ta = els.messageInput;
-  ta.style.height = 'auto';
-  ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
-}
 els.messageInput.addEventListener('input', autoResizeTextarea);
+els.messagesArea.addEventListener('scroll', () => {
+  state.shouldAutoScroll = isNearBottom(els.messagesArea);
+});
 
 document.querySelectorAll('.chip').forEach((chip) => {
   chip.addEventListener('click', () => {
     els.messageInput.value = chip.dataset.msg;
+    autoResizeTextarea();
     sendMessage();
   });
 });
 
-els.newChatBtn.addEventListener('click', () => {
-  state.currentConversationId = null;
-  clearActiveFile();
-  els.chatTitle.textContent = 'New Conversation';
-  delete els.chatTitle.dataset.set;
-  els.messagesArea.innerHTML = '';
-  els.messagesArea.appendChild(els.welcomeSplash);
-  els.welcomeSplash.style.display = '';
-  switchTab('chat');
-  els.messageInput.focus();
-  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-});
-
-// ─── Notes ─────────────────────────────────────────────────────────────────────
-
-async function loadNotes() {
-  if (!state.authToken) return;
-  try {
-    const notes = await API.get('/notes');
-    renderNotes(notes);
-  } catch { showToast('Failed to load notes.', 'error'); }
-}
-
-function renderNotes(notes) {
-  if (!notes.length) {
-    els.notesGrid.innerHTML = `<div class="empty-state"><span>📝</span><p>No notes yet. Create your first note!</p></div>`;
-    return;
-  }
-  els.notesGrid.innerHTML = notes.map((n) => `
-    <div class="note-card" data-id="${n.id}">
-      <h3>${escapeHtml(n.title)}</h3>
-      <p>${escapeHtml(n.content)}</p>
-      <div class="note-card-meta">
-        <span>${formatDate(n.created_at)}</span>
-        <div class="note-actions">
-          <button class="note-action-btn edit-note" data-id="${n.id}">✏️ Edit</button>
-          <button class="note-action-btn delete delete-note" data-id="${n.id}">🗑️ Delete</button>
-        </div>
-      </div>
-    </div>
-  `).join('');
-  document.querySelectorAll('.edit-note').forEach((btn) => {
-    btn.addEventListener('click', (e) => { e.stopPropagation(); openEditNote(btn.dataset.id, notes); });
-  });
-  document.querySelectorAll('.delete-note').forEach((btn) => {
-    btn.addEventListener('click', (e) => { e.stopPropagation(); deleteNote(btn.dataset.id); });
-  });
-}
-
-function openEditor(title = '', content = '', noteId = null) {
-  state.editingNoteId = noteId;
-  els.noteTitleInput.value = title;
-  els.noteContentInput.value = content;
-  els.noteEditor.classList.remove('hidden');
-  els.noteTitleInput.focus();
-}
-function openEditNote(id, notes) {
-  const note = notes.find((n) => n.id === parseInt(id));
-  if (note) openEditor(note.title, note.content, note.id);
-}
-
+els.newChatBtn.addEventListener('click', startNewChat);
 els.addNoteBtn.addEventListener('click', () => {
   if (!state.authToken) {
     updateAuthUi();
@@ -705,10 +1348,17 @@ els.saveNoteBtn.addEventListener('click', async () => {
     return;
   }
 
-  const title   = els.noteTitleInput.value.trim();
+  const title = els.noteTitleInput.value.trim();
   const content = els.noteContentInput.value.trim();
-  if (!title)   { showToast('Please enter a title.', 'error'); return; }
-  if (!content) { showToast('Please enter content.', 'error'); return; }
+  if (!title) {
+    showToast('Please enter a title.', 'error');
+    return;
+  }
+  if (!content) {
+    showToast('Please enter content.', 'error');
+    return;
+  }
+
   try {
     if (state.editingNoteId) {
       await API.patch(`/notes/${state.editingNoteId}`, { title, content });
@@ -719,167 +1369,28 @@ els.saveNoteBtn.addEventListener('click', async () => {
     }
     els.noteEditor.classList.add('hidden');
     state.editingNoteId = null;
-    loadNotes();
-  } catch (err) { showToast(err.message || 'Failed to save note.', 'error'); }
+    await loadNotes();
+  } catch (err) {
+    showToast(err.message || 'Failed to save note.', 'error');
+  }
 });
 
-async function deleteNote(id) {
-  if (!state.authToken) {
-    updateAuthUi();
-    setAuthMessage('Please log in to manage notes.', 'error');
-    return;
-  }
-  if (!confirm('Delete this note?')) return;
-  try {
-    await API.delete(`/notes/${id}`);
-    showToast('Note deleted.', 'success');
-    loadNotes();
-  } catch (err) { showToast(err.message || 'Failed to delete note.', 'error'); }
-}
-
-// ─── History ───────────────────────────────────────────────────────────────────
-
-async function loadHistory() {
-  if (!state.authToken) return;
-  try {
-    const convos = await API.get('/conversations');
-    renderHistory(convos);
-  } catch { showToast('Failed to load history.', 'error'); }
-}
-
-function renderHistory(convos) {
-  if (!convos.length) {
-    els.historyList.innerHTML = `<div class="empty-state"><span>🕑</span><p>No conversations yet. Start chatting!</p></div>`;
-    return;
-  }
-  els.historyList.innerHTML = convos.map((c) => `
-    <div class="history-item" data-id="${c.id}">
-      <div class="history-item-info">
-        <h4>${escapeHtml(c.title)}</h4>
-        <span>${formatDate(c.created_at)}</span>
-      </div>
-      <div class="history-item-actions">
-        <button class="note-action-btn delete delete-convo" data-id="${c.id}">🗑️</button>
-      </div>
-    </div>
-  `).join('');
-  document.querySelectorAll('.history-item').forEach((item) => {
-    item.addEventListener('click', (e) => {
-      if (e.target.closest('.delete-convo')) return;
-      loadConversation(item.dataset.id);
-    });
-  });
-  document.querySelectorAll('.delete-convo').forEach((btn) => {
-    btn.addEventListener('click', async (e) => { e.stopPropagation(); await deleteConversation(btn.dataset.id); });
-  });
-}
-
-async function loadConversation(id) {
-  if (!state.authToken) return;
-  try {
-    const [messages, convo] = await Promise.all([
-      API.get(`/conversations/${id}/messages`),
-      API.get(`/conversations/${id}`),
-    ]);
-    state.currentConversationId = parseInt(id);
-    els.chatTitle.textContent = convo.title;
-    els.chatTitle.dataset.set = '1';
-    if (convo.document_file_id) {
-      setActiveFile({
-        id: convo.document_file_id,
-        name: convo.document_filename || 'Document',
-        meta: 'Document chat',
-      });
-    } else {
-      clearActiveFile();
-    }
-    els.messagesArea.innerHTML = '';
-    if (messages.length === 0) {
-      els.messagesArea.appendChild(els.welcomeSplash);
-      els.welcomeSplash.style.display = '';
-    } else {
-      hideSplash();
-      messages.forEach((m) => els.messagesArea.appendChild(createMessageEl(m.role, m.content)));
-      scrollBottom();
-    }
-    switchTab('chat');
-  } catch { showToast('Failed to load conversation.', 'error'); }
-}
-
-async function deleteConversation(id) {
-  if (!state.authToken) {
-    updateAuthUi();
-    setAuthMessage('Please log in to access conversations.', 'error');
-    return;
-  }
-  if (!confirm('Archive this conversation?')) return;
-  try {
-    await API.delete(`/conversations/${id}`);
-    if (state.currentConversationId === parseInt(id)) state.currentConversationId = null;
-    showToast('Conversation archived.', 'success');
-    loadHistory();
-  } catch (err) { showToast(err.message || 'Failed to archive conversation.', 'error'); }
-}
-
-// ─── Utilities ─────────────────────────────────────────────────────────────────
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-function formatDate(dateStr) {
-  if (!dateStr) return '';
-  return new Date(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function showToast(msg, type = '') {
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.textContent = msg;
-  els.toastContainer.appendChild(toast);
-  setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transition = 'opacity 0.3s';
-    setTimeout(() => toast.remove(), 350);
-  }, 3500);
-}
-
-function updateInputHint(content) {
-  if (!els.inputHint) return;
-  els.inputHint.innerHTML = content;
-}
-
-// ─── Health Check ──────────────────────────────────────────────────────────────
-
-async function checkHealth() {
-  try {
-    const data = await API.get('/health');
-    const aiOk = data?.ai_service?.status === 'ok';
-    els.statusDot.classList.remove('status-offline');
-    els.statusDot.classList.toggle('status-online', aiOk);
-    els.statusDot.classList.toggle('status-ai-error', !aiOk);
-    els.statusText.textContent = aiOk ? 'Online' : 'AI Error';
-  } catch {
-    els.statusDot.classList.remove('status-online', 'status-ai-error');
-    els.statusDot.classList.add('status-offline');
-    els.statusText.textContent = 'Offline';
-  }
-}
-
-// ─── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => Sidebar.sync());
 
 window.addEventListener('DOMContentLoaded', () => {
+  if (window.JarvisMotion) window.JarvisMotion.markAppReady();
+  else requestAnimationFrame(() => document.body.classList.add('app-ready'));
+
+  Sidebar.sync();
   updateAuthUi();
   setAuthMode('login');
+  updateInputHint(DEFAULT_INPUT_HINT);
   checkHealth();
-  verifyStoredSession().then((authenticated) => {
+
+  verifyStoredSession().then(async (authenticated) => {
     if (authenticated) {
-      els.messageInput.focus();
+      await refreshConversationLists().catch(() => {});
+      InputBar.focus();
     } else {
       els.loginEmail.focus();
     }

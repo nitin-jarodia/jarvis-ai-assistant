@@ -39,7 +39,8 @@ pip install -r requirements.txt
 ### 2. Run the server
 
 ```bash
-python run.py
+
+
 ```
 
 Or directly with uvicorn:

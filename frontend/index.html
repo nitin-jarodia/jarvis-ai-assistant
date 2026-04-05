@@ -9,8 +9,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/css/style.css?v=20260402-themefix" />
+  <link rel="stylesheet" href="/static/css/animations.css?v=20260404-motion" />
 </head>
 <body>
+  <div class="app-noise" aria-hidden="true"></div>
   <div class="bg-orbs" aria-hidden="true">
     <span class="orb orb-1"></span>
     <span class="orb orb-2"></span>
@@ -55,14 +57,35 @@
   </section>
 
   <div class="app-shell">
+    <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <div class="logo">
           <span class="logo-icon">⚡</span>
-          <span class="logo-text">Jarvis</span>
+          <div class="logo-copy">
+            <span class="logo-text">Jarvis</span>
+            <span class="logo-subtext">Premium AI Workspace</span>
+          </div>
         </div>
         <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">&#9776;</button>
       </div>
+
+      <button class="new-chat-btn" id="newChatBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span>New Chat</span>
+      </button>
+
+      <section class="sidebar-section sidebar-section-history">
+        <div class="sidebar-section-header">
+          <span>Recent Chats</span>
+          <button class="sidebar-section-action" id="openHistoryBtn" type="button">View all</button>
+        </div>
+        <div class="sidebar-history-list" id="sidebarHistoryList">
+          <div class="sidebar-empty-state">
+            <span>Conversations will appear here.</span>
+          </div>
+        </div>
+      </section>
 
       <nav class="sidebar-nav">
         <button class="nav-btn active" id="navChat" data-tab="chat">
@@ -80,10 +103,6 @@
       </nav>
 
       <div class="sidebar-footer">
-        <button class="new-chat-btn" id="newChatBtn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          New Chat
-        </button>
         <div class="auth-panel">
           <div class="auth-panel-copy">
             <span class="auth-panel-label">Signed in</span>
@@ -94,11 +113,17 @@
       </div>
     </aside>
 
-    <main class="main-content">
-      <section class="tab-panel" id="tabChat">
+    <main class="main-content" id="mainContent">
+      <section class="tab-panel tab-panel--active" id="tabChat" aria-hidden="false">
         <div class="chat-header">
           <div class="chat-header-left">
-            <h1 class="chat-title" id="chatTitle">New Conversation</h1>
+            <button class="mobile-menu-btn" id="mobileMenuBtn" type="button" aria-label="Open sidebar">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            </button>
+            <div class="chat-title-group">
+              <span class="chat-eyebrow">Jarvis AI Assistant</span>
+              <h1 class="chat-title" id="chatTitle">New Conversation</h1>
+            </div>
             <!-- File mode badge — shown when a document is active -->
             <div class="file-mode-chip hidden" id="fileModeChip">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
@@ -111,11 +136,13 @@
           </div>
         </div>
 
-        <div class="messages-area" id="messagesArea">
+        <div class="chat-container" id="chatContainer">
+          <div class="messages-area" id="messagesArea">
           <div class="welcome-splash" id="welcomeSplash">
+            <div class="welcome-badge">Premium Assistant</div>
             <div class="welcome-icon">⚡</div>
             <h2>Good to see you.</h2>
-            <p>I'm Jarvis, your personal AI assistant.<br/>Ask me anything — or upload a document to analyze it.</p>
+            <p>Ask naturally, upload documents, and get polished responses with code, markdown, and conversation history that feels instant.</p>
             <div class="suggestion-chips">
               <button class="chip" data-msg="Hello Jarvis! Who are you?">Who are you?</button>
               <button class="chip" data-msg="What's today's date?">Today's date</button>
@@ -123,6 +150,7 @@
               <button class="chip" data-msg="How can you help me?">How can you help?</button>
             </div>
           </div>
+        </div>
         </div>
 
         <!-- File badge — shows active document with dismiss button -->
@@ -157,6 +185,7 @@
               aria-label="Message input"
             ></textarea>
             <button class="send-btn" id="sendBtn" aria-label="Send message">
+              <span class="send-btn-spinner" aria-hidden="true"></span>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
             </button>
           </div>
@@ -164,7 +193,7 @@
         </div>
       </section>
 
-      <section class="tab-panel hidden" id="tabNotes">
+      <section class="tab-panel" id="tabNotes" aria-hidden="true">
         <div class="panel-header">
           <h1>Notes</h1>
           <button class="action-btn" id="addNoteBtn">
@@ -190,7 +219,7 @@
         </div>
       </section>
 
-      <section class="tab-panel hidden" id="tabHistory">
+      <section class="tab-panel" id="tabHistory" aria-hidden="true">
         <div class="panel-header">
           <h1>Chat History</h1>
         </div>
@@ -207,6 +236,8 @@
   <div class="toast-container" id="toastContainer" aria-live="polite"></div>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="/static/js/app.js?v=20260402-themefix"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="/static/js/motion-utils.js?v=20260404-motion"></script>
+  <script src="/static/js/app.js?v=20260404-motion"></script>
 </body>
 </html>

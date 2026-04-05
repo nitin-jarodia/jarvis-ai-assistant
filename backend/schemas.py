@@ -1,14 +1,10 @@
-"""
-Pydantic schemas for request/response validation in Jarvis AI Assistant.
-"""
+"""Pydantic schemas for request/response validation in Jarvis AI Assistant."""
 
 from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
-
-# ─── Authentication Schemas ────────────────────────────────────────────────────
 
 class UserRegister(BaseModel):
     email: EmailStr
@@ -33,23 +29,20 @@ class ProtectedResponse(BaseModel):
     user_id: int
 
 
-# ─── Conversation Schemas ─────────────────────────────────────────────────────
-
-class ConversationCreate(BaseModel):
-    title: str = Field(default="New Conversation", max_length=255)
-    document_file_id: Optional[str] = None
-    document_filename: Optional[str] = Field(default=None, max_length=255)
+class ChatCreateRequest(BaseModel):
+    title: str = Field(default="New Chat", max_length=255)
 
 
-class ConversationUpdate(BaseModel):
-    title: Optional[str] = Field(None, max_length=255)
+class ChatUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=255)
     document_file_id: Optional[str] = None
     document_filename: Optional[str] = Field(default=None, max_length=255)
     is_active: Optional[bool] = None
 
 
-class ConversationOut(BaseModel):
+class ChatOut(BaseModel):
     id: int
+    user_id: Optional[int]
     title: str
     document_file_id: Optional[str]
     document_filename: Optional[str]
@@ -60,25 +53,37 @@ class ConversationOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ─── Message Schemas ──────────────────────────────────────────────────────────
-
 class MessageCreate(BaseModel):
-    conversation_id: int
+    chat_id: int
     role: str = Field(..., pattern="^(user|assistant)$")
+    agent_type: Optional[str] = Field(default=None, pattern="^(coding|research|planning|debugging)?$")
     content: str = Field(..., min_length=1)
 
 
 class MessageOut(BaseModel):
     id: int
-    conversation_id: int
+    chat_id: int
     role: str
+    agent_type: Optional[str] = None
     content: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-# ─── Chat Request / Response ──────────────────────────────────────────────────
+class ChatMessageRequest(BaseModel):
+    content: str = Field(..., min_length=1, description="User message to Jarvis")
+    file_id: Optional[str] = None
+
+
+class ChatMessageResponse(BaseModel):
+    reply: str
+    chat_id: int
+    user_message_id: int
+    assistant_message_id: int
+    agent_type: Optional[str] = None
+    model: Optional[str] = None
+
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User message to Jarvis")
@@ -89,10 +94,9 @@ class ChatResponse(BaseModel):
     reply: str
     conversation_id: int
     message_id: int
+    agent_type: Optional[str] = None
     model: Optional[str] = None
 
-
-# ─── Note Schemas ─────────────────────────────────────────────────────────────
 
 class NoteCreate(BaseModel):
     title: str = Field(..., max_length=255)
@@ -114,8 +118,6 @@ class NoteOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ─── File / Document Schemas ──────────────────────────────────────────────────
-
 class UploadResponse(BaseModel):
     file_id: str
     filename: str
@@ -131,6 +133,7 @@ class FileChatRequest(BaseModel):
 
 class FileDocumentOut(BaseModel):
     file_id: str
+    user_id: Optional[int]
     filename: str
     file_type: str
     chunk_count: int

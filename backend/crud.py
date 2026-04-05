@@ -1,86 +1,92 @@
-"""
-CRUD (Create, Read, Update, Delete) operations for Jarvis AI Assistant.
-"""
+"""CRUD (Create, Read, Update, Delete) operations for Jarvis AI Assistant."""
+
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone
+
 from backend import models, schemas
 
 
-# ─── Conversation CRUD ────────────────────────────────────────────────────────
+def _utc_now():
+    return datetime.now(timezone.utc)
 
-def get_conversations(db: Session, skip: int = 0, limit: int = 50):
+
+def get_user_chats(db: Session, user_id: int, skip: int = 0, limit: int = 50):
     return (
-        db.query(models.Conversation)
-        .filter(models.Conversation.is_active == True)
-        .order_by(models.Conversation.created_at.desc())
+        db.query(models.Chat)
+        .filter(models.Chat.user_id == user_id, models.Chat.is_active.is_(True))
+        .order_by(models.Chat.updated_at.desc(), models.Chat.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()
     )
 
 
-def get_conversation(db: Session, conversation_id: int):
-    return db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
-
-
-def create_conversation(db: Session, data: schemas.ConversationCreate):
-    obj = models.Conversation(
-        title=data.title,
-        document_file_id=data.document_file_id,
-        document_filename=data.document_filename,
+def get_user_chat(db: Session, chat_id: int, user_id: int):
+    return (
+        db.query(models.Chat)
+        .filter(
+            models.Chat.id == chat_id,
+            models.Chat.user_id == user_id,
+            models.Chat.is_active.is_(True),
+        )
+        .first()
     )
-    db.add(obj)
+
+
+def create_chat(db: Session, user_id: int, data: schemas.ChatCreateRequest):
+    chat = models.Chat(user_id=user_id, title=data.title, updated_at=_utc_now())
+    db.add(chat)
     db.commit()
-    db.refresh(obj)
-    return obj
+    db.refresh(chat)
+    return chat
 
 
-def update_conversation(db: Session, conversation_id: int, data: schemas.ConversationUpdate):
-    obj = get_conversation(db, conversation_id)
-    if not obj:
-        return None
+def update_chat(db: Session, chat: models.Chat, data: schemas.ChatUpdate):
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
-        setattr(obj, key, value)
-    obj.updated_at = datetime.now(timezone.utc)
+        setattr(chat, key, value)
+    chat.updated_at = _utc_now()
     db.commit()
-    db.refresh(obj)
-    return obj
+    db.refresh(chat)
+    return chat
 
 
-def delete_conversation(db: Session, conversation_id: int):
-    obj = get_conversation(db, conversation_id)
-    if obj:
-        obj.is_active = False
-        db.commit()
-    return obj
+def touch_chat(db: Session, chat: models.Chat):
+    chat.updated_at = _utc_now()
+    db.commit()
+    db.refresh(chat)
+    return chat
 
 
-# ─── Message CRUD ─────────────────────────────────────────────────────────────
+def delete_chat(db: Session, chat: models.Chat):
+    db.query(models.Message).filter(models.Message.chat_id == chat.id).delete()
+    db.delete(chat)
+    db.commit()
 
-def get_messages(db: Session, conversation_id: int):
+
+def get_chat_messages(db: Session, chat_id: int):
     return (
         db.query(models.Message)
-        .filter(models.Message.conversation_id == conversation_id)
-        .order_by(models.Message.created_at.asc())
+        .filter(models.Message.chat_id == chat_id)
+        .order_by(models.Message.created_at.asc(), models.Message.id.asc())
         .all()
     )
 
 
 def create_message(db: Session, data: schemas.MessageCreate):
-    obj = models.Message(
-        conversation_id=data.conversation_id,
+    message = models.Message(
+        conversation_id=data.chat_id,
+        chat_id=data.chat_id,
         role=data.role,
+        agent_type=data.agent_type,
         content=data.content,
     )
-    db.add(obj)
+    db.add(message)
     db.commit()
-    db.refresh(obj)
-    return obj
+    db.refresh(message)
+    return message
 
-
-# ─── Note CRUD ────────────────────────────────────────────────────────────────
 
 def get_notes(db: Session, skip: int = 0, limit: int = 100):
     return (
@@ -111,7 +117,7 @@ def update_note(db: Session, note_id: int, data: schemas.NoteUpdate):
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(obj, key, value)
-    obj.updated_at = datetime.now(timezone.utc)
+    obj.updated_at = _utc_now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -125,28 +131,40 @@ def delete_note(db: Session, note_id: int):
     return obj
 
 
-# ─── File Document CRUD ───────────────────────────────────────────────────────
-
-def create_file_document(db: Session, file_id: str, filename: str, file_type: str, chunk_count: int):
-    obj = models.FileDocument(
+def create_file_document(
+    db: Session,
+    *,
+    user_id: int,
+    file_id: str,
+    filename: str,
+    file_type: str,
+    chunk_count: int,
+):
+    file_doc = models.FileDocument(
+        user_id=user_id,
         file_id=file_id,
         filename=filename,
         file_type=file_type,
         chunk_count=chunk_count,
     )
-    db.add(obj)
+    db.add(file_doc)
     db.commit()
-    db.refresh(obj)
-    return obj
+    db.refresh(file_doc)
+    return file_doc
 
 
-def get_file_document(db: Session, file_id: str):
-    return db.query(models.FileDocument).filter(models.FileDocument.file_id == file_id).first()
-
-
-def get_file_documents(db: Session, skip: int = 0, limit: int = 50):
+def get_user_file_document(db: Session, file_id: str, user_id: int):
     return (
         db.query(models.FileDocument)
+        .filter(models.FileDocument.file_id == file_id, models.FileDocument.user_id == user_id)
+        .first()
+    )
+
+
+def get_user_file_documents(db: Session, user_id: int, skip: int = 0, limit: int = 50):
+    return (
+        db.query(models.FileDocument)
+        .filter(models.FileDocument.user_id == user_id)
         .order_by(models.FileDocument.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -154,23 +172,18 @@ def get_file_documents(db: Session, skip: int = 0, limit: int = 50):
     )
 
 
-def delete_file_document(db: Session, file_id: str) -> bool:
-    """Delete the document record and all its associated chunks."""
-    # Delete chunks first
+def delete_user_file_document(db: Session, file_id: str, user_id: int) -> bool:
     db.query(models.FileChunk).filter(models.FileChunk.file_id == file_id).delete()
-    # Delete document record
-    deleted = db.query(models.FileDocument).filter(models.FileDocument.file_id == file_id).delete()
+    deleted = (
+        db.query(models.FileDocument)
+        .filter(models.FileDocument.file_id == file_id, models.FileDocument.user_id == user_id)
+        .delete()
+    )
     db.commit()
     return deleted > 0
 
 
-# ─── File Chunk CRUD ──────────────────────────────────────────────────────────
-
 def create_file_chunks(db: Session, file_id: str, chunks: list[tuple[int, str, bytes]]) -> None:
-    """
-    Bulk-insert file chunks.
-    chunks: list of (chunk_index, content, embedding_bytes)
-    """
     objects = [
         models.FileChunk(
             file_id=file_id,
