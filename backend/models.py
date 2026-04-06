@@ -1,5 +1,7 @@
 """SQLAlchemy ORM models for Jarvis AI Assistant."""
 
+import json
+
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -51,9 +53,24 @@ class Message(Base):
     role = Column(String(50), nullable=False)  # 'user' or 'assistant'
     agent_type = Column(String(32), nullable=True)
     content = Column(Text, nullable=False)
+    message_type = Column(String(32), nullable=True, default="text")
+    image_url = Column(String(1024), nullable=True)
+    attachment_url = Column(String(1024), nullable=True)
+    provider = Column(String(64), nullable=True)
+    response_type = Column(String(32), nullable=True)
+    metadata_json = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     chat = relationship("Chat", back_populates="messages")
+
+    @property
+    def message_metadata(self):
+        if not self.metadata_json:
+            return None
+        try:
+            return json.loads(self.metadata_json)
+        except json.JSONDecodeError:
+            return None
 
 
 class Note(Base):

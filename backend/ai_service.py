@@ -34,44 +34,21 @@ For coding: use proper indentation and code blocks with language identifiers.
 For math: show steps clearly.
 Do not give messy or unformatted output."""
 
-CLASSIFIER_PROMPT_TEMPLATE = """Classify the user query into one word:
-[coding, research, planning, debugging]
+CLASSIFIER_PROMPT_TEMPLATE = """Classify this query into one word:
+coding, research, planning, debugging.
 
 Query: {input}
-Return only one word."""
+Answer:"""
 
 AGENT_SYSTEM_PROMPTS = {
-    "coding": """You are Jarvis Coding Agent.
-Handle coding, DSA, implementation, and algorithm questions.
-Respond with:
-1. Direct answer
-2. Step-by-step reasoning
-3. Example or code snippet when useful
-Keep the solution practical and well structured.""",
-    "research": """You are Jarvis Research Agent.
-Explain concepts clearly and accurately.
-Respond with:
-1. Short answer
-2. Clear explanation
-3. Example or analogy when helpful
-Avoid unnecessary verbosity.""",
-    "planning": """You are Jarvis Planner Agent.
-Create roadmaps, plans, and strategies.
-Respond with:
-1. Goal
-2. Recommended plan
-3. Prioritized next steps
-Keep the structure actionable and concise.""",
-    "debugging": """You are Jarvis Debug Agent.
-Analyze bugs, errors, and failing behavior.
-Respond with:
-1. Likely cause
-2. How to verify it
-3. Recommended fix
-Be concrete and diagnostic.""",
+    "coding": "You are Jarvis Coding. Give concise, practical coding help. Use code blocks only when useful.",
+    "research": "You are Jarvis Research. Give concise, accurate explanations with only relevant detail.",
+    "planning": "You are Jarvis Planner. Provide short actionable plans with prioritized next steps.",
+    "debugging": "You are Jarvis Debug. Identify likely causes, quick checks, and concrete fixes.",
 }
 
 VALID_AGENT_TYPES = tuple(AGENT_SYSTEM_PROMPTS.keys())
+VALID_SELECTED_AGENT_TYPES = ("auto", *VALID_AGENT_TYPES)
 
 # ─── Groq Client (module-level singleton) ─────────────────────────────────────
 
@@ -115,6 +92,9 @@ def _ensure_client() -> Groq | None:
 def generate_response_from_messages(
     messages: list[dict[str, str]],
     failure_message: str | None = None,
+    *,
+    max_tokens: int = 2048,
+    temperature: float = 0.5,
 ) -> str:
     """Send a prepared message list to Groq and return the assistant reply."""
     client = _ensure_client()
@@ -128,8 +108,8 @@ def generate_response_from_messages(
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=0.5,
-            max_tokens=2048,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
         reply = (response.choices[0].message.content or "").strip()
@@ -179,6 +159,22 @@ def generate_response_from_messages(
         return failure_message or "An unexpected error occurred. Please try again."
 
 
+def generateResponse(
+    messages: list[dict[str, str]],
+    failure_message: str | None = None,
+    *,
+    max_tokens: int = 2048,
+    temperature: float = 0.5,
+) -> str:
+    """Standard Groq chat function used across the app."""
+    return generate_response_from_messages(
+        messages,
+        failure_message,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+
 def _normalize_agent_type(raw_value: str | None) -> str:
     cleaned = (raw_value or "").strip().lower()
     if cleaned in VALID_AGENT_TYPES:
@@ -193,6 +189,11 @@ def _normalize_agent_type(raw_value: str | None) -> str:
     return "research"
 
 
+def _normalize_selected_agent(raw_value: str | None) -> str:
+    cleaned = (raw_value or "").strip().lower()
+    return cleaned if cleaned in VALID_SELECTED_AGENT_TYPES else "auto"
+
+
 @lru_cache(maxsize=256)
 def _classify_query_cached(normalized_input: str) -> str:
     if not normalized_input:
@@ -201,16 +202,18 @@ def _classify_query_cached(normalized_input: str) -> str:
     classifier_messages = [
         {
             "role": "system",
-            "content": "You are a routing classifier. Return exactly one word from: coding, research, planning, debugging.",
+            "content": "Return one word only: coding, research, planning, or debugging.",
         },
         {
             "role": "user",
             "content": CLASSIFIER_PROMPT_TEMPLATE.format(input=normalized_input),
         },
     ]
-    raw_result = generate_response_from_messages(
+    raw_result = generateResponse(
         classifier_messages,
         failure_message="research",
+        max_tokens=4,
+        temperature=0,
     )
     return _normalize_agent_type(raw_result)
 
@@ -228,17 +231,23 @@ def generate_agent_response(
     *,
     user_input: str,
     history: list[dict[str, str]] | None = None,
+    selected_agent: str = "auto",
 ) -> tuple[str, str]:
     """
-    Classify the query and generate a response with the matching specialist agent.
-    Uses at most two Groq calls: one for classification and one for the final reply.
+    Route to the selected specialist agent.
+    Manual agent selection uses a single Groq call. Auto routing uses a cheap classifier first.
     """
-    agent_type = classify_query(user_input)
+    normalized_selection = _normalize_selected_agent(selected_agent)
+    agent_type = (
+        normalized_selection
+        if normalized_selection != "auto"
+        else classify_query(user_input)
+    )
     messages = [{"role": "system", "content": build_agent_system_prompt(agent_type)}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_input})
-    reply = generate_response_from_messages(
+    reply = generateResponse(
         messages,
         failure_message="I couldn't generate a response right now. Please try again.",
     )
@@ -259,4 +268,4 @@ def generate_response(
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": message})
-    return generate_response_from_messages(messages)
+    return generateResponse(messages)

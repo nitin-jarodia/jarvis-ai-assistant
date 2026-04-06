@@ -1,5 +1,4 @@
 """CRUD (Create, Read, Update, Delete) operations for Jarvis AI Assistant."""
-
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -81,6 +80,12 @@ def create_message(db: Session, data: schemas.MessageCreate):
         role=data.role,
         agent_type=data.agent_type,
         content=data.content,
+        message_type=data.message_type,
+        image_url=data.image_url,
+        attachment_url=data.attachment_url,
+        provider=data.provider,
+        response_type=data.response_type,
+        metadata_json=data.metadata_json,
     )
     db.add(message)
     db.commit()

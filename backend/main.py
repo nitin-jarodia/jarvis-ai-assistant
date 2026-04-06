@@ -5,13 +5,14 @@ Run with: uvicorn backend.main:app --reload
 """
 
 import asyncio
+import json
 import os
 import uuid
 import logging
 from contextlib import asynccontextmanager
 from typing import List
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +25,18 @@ from backend import crud, schemas
 from backend import ai_service
 from backend import file_service
 from backend.routes.image_routes import router as image_router
+from backend.services import ai_router, image_generation, media_store
+from backend.services import image_analysis_service as image_analysis
+from backend.services.provider_types import (
+    MESSAGE_TYPE_IMAGE_ANALYSIS,
+    MESSAGE_TYPE_IMAGE_GENERATION,
+    MESSAGE_TYPE_TEXT,
+    ROUTE_MODE_ANALYZE_IMAGE,
+    ROUTE_MODE_CHAT,
+    ROUTE_MODE_GENERATE_IMAGE,
+    ProviderConfigurationError,
+    ProviderRequestError,
+)
 from backend.utils import SECRET_KEY
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -41,6 +54,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     if not SECRET_KEY:
         raise RuntimeError("SECRET_KEY environment variable is required to start the application.")
+    media_store.ensure_media_dirs()
     init_db()
     logger.info("=== Jarvis AI Assistant started ===")
     if os.getenv("GROQ_API_KEY"):
@@ -65,8 +79,11 @@ app = FastAPI(
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 STATIC_DIR   = os.path.join(FRONTEND_DIR, "static")
+media_store.ensure_media_dirs()
+MEDIA_DIR = str(media_store.MEDIA_ROOT)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 
 app.add_middleware(
     CORSMiddleware,
@@ -114,6 +131,7 @@ async def health_check():
         "status": "ok",
         "service": "Jarvis AI Assistant",
         "ai_service": ai_service.check_ai_service(),
+        "providers": _provider_health(),
     }
 
 
@@ -156,6 +174,33 @@ def _chat_title_from_message(content: str, file_name: str | None = None) -> str:
     return f"[{file_name}] {base}"[:255] if file_name else base[:255]
 
 
+def _metadata_json(metadata: dict | None) -> str | None:
+    if not metadata:
+        return None
+    return json.dumps(metadata)
+
+
+def _provider_error_status(detail: str) -> int:
+    detail_lower = detail.lower()
+    if "too large" in detail_lower:
+        return status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    if "unsupported" in detail_lower or "required" in detail_lower:
+        return status.HTTP_400_BAD_REQUEST
+    if "rate limited" in detail_lower:
+        return status.HTTP_429_TOO_MANY_REQUESTS
+    if "configured" in detail_lower or "api key" in detail_lower:
+        return status.HTTP_503_SERVICE_UNAVAILABLE
+    return status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def _provider_health() -> dict:
+    return {
+        "text_provider": "groq" if os.getenv("GROQ_API_KEY") else "unconfigured",
+        "image_provider": os.getenv("IMAGE_PROVIDER_NAME", "pollinations"),
+        "vision_provider": os.getenv("VISION_PROVIDER_NAME", image_analysis.DEFAULT_VISION_PROVIDER),
+    }
+
+
 def _get_owned_chat(db: Session, user_id: int, chat_id: int):
     chat = crud.get_user_chat(db, chat_id, user_id)
     if not chat:
@@ -177,10 +222,26 @@ async def _generate_chat_reply(
     chat,
     content: str,
     file_id: str | None = None,
+    selected_agent: str = "auto",
+    request_mode: str = "auto",
+    style: str | None = None,
+    aspect_ratio: str | None = None,
+    size: str | None = None,
+    image_upload: UploadFile | None = None,
+    image_url: str | None = None,
 ) -> schemas.ChatMessageResponse:
+    normalized_content = content.strip()
+    normalized_image_url = (image_url or "").strip() or None
+    has_image_attachment = image_upload is not None or normalized_image_url is not None
+    normalized_request_mode = ai_router.normalize_mode(request_mode)
     file_doc = None
     agent_type = None
-    target_file_id = file_id or chat.document_file_id
+    target_file_id = (
+        (file_id or chat.document_file_id)
+        if normalized_request_mode not in {ROUTE_MODE_GENERATE_IMAGE, ROUTE_MODE_ANALYZE_IMAGE}
+        and not has_image_attachment
+        else None
+    )
     if target_file_id:
         file_doc = _get_owned_file(db, user_id, target_file_id)
         if chat.document_file_id and chat.document_file_id != target_file_id:
@@ -195,14 +256,23 @@ async def _generate_chat_reply(
                 ),
             )
 
-    user_msg = crud.create_message(
-        db,
-        schemas.MessageCreate(chat_id=chat.id, role="user", content=content),
-    )
-    existing = crud.get_chat_messages(db, chat.id)
-    history = _recent_history(existing[:-1], limit=15)
-
     if file_doc:
+        if not normalized_content:
+            raise HTTPException(status_code=400, detail="A question is required for document chat.")
+
+        user_msg = crud.create_message(
+            db,
+            schemas.MessageCreate(
+                chat_id=chat.id,
+                role="user",
+                content=normalized_content,
+                message_type=MESSAGE_TYPE_TEXT,
+                response_type=MESSAGE_TYPE_TEXT,
+            ),
+        )
+        existing = crud.get_chat_messages(db, chat.id)
+        history = _recent_history(existing[:-1], limit=15)
+
         chunk_rows = crud.get_file_chunks(db, file_doc.file_id)
         if not chunk_rows:
             raise HTTPException(
@@ -233,16 +303,139 @@ async def _generate_chat_reply(
             {"role": "user", "content": content},
         ]
         reply = await asyncio.to_thread(
-            ai_service.generate_response_from_messages,
+            ai_service.generateResponse,
             groq_messages,
             "I couldn't analyze the document right now. Please try again.",
         )
+        message_type = MESSAGE_TYPE_TEXT
+        provider_name = "groq"
+        response_type = MESSAGE_TYPE_TEXT
+        response_model = ai_service.MODEL_NAME
+        response_metadata = {"document_filename": file_doc.filename}
+        structured_notes = None
+        response_image_url = None
+        response_attachment_url = None
     else:
-        agent_type, reply = await asyncio.to_thread(
-            ai_service.generate_agent_response,
-            user_input=content,
-            history=history,
+        decision = ai_router.decide_route(
+            mode=normalized_request_mode,
+            text=normalized_content,
+            has_image_attachment=has_image_attachment,
         )
+
+        if decision.mode == ROUTE_MODE_CHAT:
+            if not normalized_content:
+                raise HTTPException(status_code=400, detail="Message content is required for chat.")
+
+            user_msg = crud.create_message(
+                db,
+                schemas.MessageCreate(
+                    chat_id=chat.id,
+                    role="user",
+                    content=normalized_content,
+                    message_type=MESSAGE_TYPE_TEXT,
+                    response_type=MESSAGE_TYPE_TEXT,
+                ),
+            )
+            existing = crud.get_chat_messages(db, chat.id)
+            history = _recent_history(existing[:-1], limit=15)
+            agent_type, reply = await asyncio.to_thread(
+                ai_service.generate_agent_response,
+                user_input=normalized_content,
+                history=history,
+                selected_agent=selected_agent,
+            )
+            message_type = MESSAGE_TYPE_TEXT
+            provider_name = "groq"
+            response_type = MESSAGE_TYPE_TEXT
+            response_model = ai_service.MODEL_NAME
+            response_metadata = {"route_reason": decision.reason}
+            structured_notes = None
+            response_image_url = None
+            response_attachment_url = None
+        elif decision.mode == ROUTE_MODE_GENERATE_IMAGE:
+            if not normalized_content:
+                raise HTTPException(status_code=400, detail="An image prompt is required.")
+
+            try:
+                generation_result = await asyncio.to_thread(
+                    image_generation.generate_image,
+                    prompt=normalized_content,
+                    style=style,
+                    aspect_ratio=aspect_ratio,
+                    size=size,
+                )
+            except (ProviderRequestError, ProviderConfigurationError) as exc:
+                raise HTTPException(status_code=_provider_error_status(str(exc)), detail=str(exc)) from exc
+
+            user_msg = crud.create_message(
+                db,
+                schemas.MessageCreate(
+                    chat_id=chat.id,
+                    role="user",
+                    content=normalized_content,
+                    message_type=MESSAGE_TYPE_IMAGE_GENERATION,
+                    response_type=MESSAGE_TYPE_IMAGE_GENERATION,
+                    metadata_json=_metadata_json(
+                        {
+                            "style": style,
+                            "aspect_ratio": aspect_ratio,
+                            "size": size,
+                        }
+                    ),
+                ),
+            )
+            reply = "Generated an image from your prompt."
+            message_type = MESSAGE_TYPE_IMAGE_GENERATION
+            provider_name = generation_result.provider
+            response_type = MESSAGE_TYPE_IMAGE_GENERATION
+            response_model = generation_result.model
+            response_metadata = {
+                "prompt": generation_result.prompt,
+                "route_reason": decision.reason,
+                **generation_result.metadata,
+            }
+            structured_notes = None
+            response_image_url = generation_result.image_url
+            response_attachment_url = None
+        elif decision.mode == ROUTE_MODE_ANALYZE_IMAGE:
+            if not has_image_attachment:
+                raise HTTPException(status_code=400, detail="Attach an image or provide an image URL to analyze.")
+
+            image_bytes = await image_upload.read() if image_upload else None
+            try:
+                analysis_result = await asyncio.to_thread(
+                    image_analysis.analyze_image,
+                    question=normalized_content,
+                    image_bytes=image_bytes,
+                    image_url=normalized_image_url,
+                    filename=image_upload.filename if image_upload else None,
+                    content_type=image_upload.content_type if image_upload else None,
+                )
+            except (ProviderRequestError, ProviderConfigurationError) as exc:
+                raise HTTPException(status_code=_provider_error_status(str(exc)), detail=str(exc)) from exc
+
+            user_msg = crud.create_message(
+                db,
+                schemas.MessageCreate(
+                    chat_id=chat.id,
+                    role="user",
+                    content=normalized_content or "Analyze this image.",
+                    message_type=MESSAGE_TYPE_IMAGE_ANALYSIS,
+                    attachment_url=analysis_result.attachment_url,
+                    response_type=MESSAGE_TYPE_IMAGE_ANALYSIS,
+                ),
+            )
+            reply = analysis_result.analysis
+            message_type = MESSAGE_TYPE_IMAGE_ANALYSIS
+            provider_name = analysis_result.provider
+            response_type = MESSAGE_TYPE_IMAGE_ANALYSIS
+            response_model = analysis_result.model
+            response_metadata = {"route_reason": decision.reason, **analysis_result.metadata}
+            structured_notes = analysis_result.structured_notes
+            response_image_url = None
+            response_attachment_url = analysis_result.attachment_url
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported request mode.")
 
     assistant_msg = crud.create_message(
         db,
@@ -251,6 +444,12 @@ async def _generate_chat_reply(
             role="assistant",
             agent_type=agent_type,
             content=reply,
+            message_type=message_type,
+            image_url=response_image_url,
+            attachment_url=response_attachment_url,
+            provider=provider_name,
+            response_type=response_type,
+            metadata_json=_metadata_json(response_metadata),
         ),
     )
 
@@ -258,7 +457,12 @@ async def _generate_chat_reply(
         chat = crud.update_chat(
             db,
             chat,
-            schemas.ChatUpdate(title=_chat_title_from_message(content, chat.document_filename)),
+            schemas.ChatUpdate(
+                title=_chat_title_from_message(
+                    normalized_content or "Image analysis",
+                    chat.document_filename,
+                )
+            ),
         )
     else:
         chat = crud.touch_chat(db, chat)
@@ -270,7 +474,14 @@ async def _generate_chat_reply(
         user_message_id=user_msg.id,
         assistant_message_id=assistant_msg.id,
         agent_type=agent_type,
-        model=ai_service.MODEL_NAME,
+        model=response_model,
+        message_type=message_type,
+        provider=provider_name,
+        response_type=response_type,
+        image_url=response_image_url,
+        attachment_url=response_attachment_url,
+        metadata=response_metadata,
+        structured_notes=structured_notes,
     )
 
 
@@ -310,7 +521,13 @@ async def post_chat_message(
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logger.info("POST /api/chat/%s/message | user_id=%s | msg='%.60s'...", chat_id, current_user_id, payload.content)
+    logger.info(
+        "POST /api/chat/%s/message | user_id=%s | agent=%s | msg='%.60s'...",
+        chat_id,
+        current_user_id,
+        payload.selected_agent,
+        payload.content,
+    )
     chat = _get_owned_chat(db, current_user_id, chat_id)
     return await _generate_chat_reply(
         db=db,
@@ -318,6 +535,41 @@ async def post_chat_message(
         chat=chat,
         content=payload.content,
         file_id=payload.file_id,
+        selected_agent=payload.selected_agent,
+        request_mode=payload.request_mode,
+        style=payload.style,
+        aspect_ratio=payload.aspect_ratio,
+        size=payload.size,
+    )
+
+
+@app.post("/api/chat/{chat_id}/message/multimodal", response_model=schemas.ChatMessageResponse, tags=["Chat"])
+async def post_multimodal_chat_message(
+    chat_id: int,
+    content: str = Form(default=""),
+    request_mode: str = Form(default="auto"),
+    selected_agent: str = Form(default="auto"),
+    style: str | None = Form(default=None),
+    aspect_ratio: str | None = Form(default=None),
+    size: str | None = Form(default=None),
+    image: UploadFile | None = File(default=None),
+    image_url: str | None = Form(default=None),
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    chat = _get_owned_chat(db, current_user_id, chat_id)
+    return await _generate_chat_reply(
+        db=db,
+        user_id=current_user_id,
+        chat=chat,
+        content=content,
+        selected_agent=selected_agent,
+        request_mode=request_mode,
+        style=style,
+        aspect_ratio=aspect_ratio,
+        size=size,
+        image_upload=image,
+        image_url=image_url,
     )
 
 
@@ -338,7 +590,13 @@ async def legacy_chat(
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    logger.info("POST /api/chat | chat_id=%s | user_id=%s | msg='%.60s'...", request.conversation_id, current_user_id, request.message)
+    logger.info(
+        "POST /api/chat | chat_id=%s | user_id=%s | agent=%s | msg='%.60s'...",
+        request.conversation_id,
+        current_user_id,
+        request.selected_agent,
+        request.message,
+    )
     chat = (
         _get_owned_chat(db, current_user_id, request.conversation_id)
         if request.conversation_id
@@ -349,6 +607,8 @@ async def legacy_chat(
         user_id=current_user_id,
         chat=chat,
         content=request.message,
+        selected_agent=request.selected_agent,
+        request_mode=request.request_mode,
     )
     return schemas.ChatResponse(
         reply=result.reply,
@@ -356,6 +616,12 @@ async def legacy_chat(
         message_id=result.assistant_message_id,
         agent_type=result.agent_type,
         model=result.model,
+        message_type=result.message_type,
+        provider=result.provider,
+        response_type=result.response_type,
+        image_url=result.image_url,
+        attachment_url=result.attachment_url,
+        metadata=result.metadata,
     )
 
 
@@ -445,6 +711,12 @@ async def file_chat(
         message_id=result.assistant_message_id,
         agent_type=result.agent_type,
         model=result.model,
+        message_type=result.message_type,
+        provider=result.provider,
+        response_type=result.response_type,
+        image_url=result.image_url,
+        attachment_url=result.attachment_url,
+        metadata=result.metadata,
     )
 
 

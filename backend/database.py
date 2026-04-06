@@ -91,6 +91,19 @@ def _run_migrations() -> None:
                     connection.execute(text("UPDATE messages SET chat_id = conversation_id WHERE chat_id IS NULL"))
             if "agent_type" not in message_columns:
                 connection.execute(text("ALTER TABLE messages ADD COLUMN agent_type VARCHAR(32)"))
+            if "message_type" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN message_type VARCHAR(32)"))
+                connection.execute(text("UPDATE messages SET message_type = 'text' WHERE message_type IS NULL"))
+            if "image_url" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN image_url VARCHAR(1024)"))
+            if "attachment_url" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN attachment_url VARCHAR(1024)"))
+            if "provider" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN provider VARCHAR(64)"))
+            if "response_type" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN response_type VARCHAR(32)"))
+            if "metadata_json" not in message_columns:
+                connection.execute(text("ALTER TABLE messages ADD COLUMN metadata_json TEXT"))
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_chat_id ON messages (chat_id)"))
 
         if "file_documents" in table_names:

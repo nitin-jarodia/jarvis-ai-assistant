@@ -2,7 +2,7 @@
 
 const MOBILE_BREAKPOINT = 960;
 const DEFAULT_INPUT_HINT =
-  'Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · <kbd>📎</kbd> to analyze a document';
+  'Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · drop an image or document to attach';
 
 const API = {
   base: '/api',
@@ -63,12 +63,15 @@ const state = {
   isLoading: false,
   editingNoteId: null,
   activeFile: null,
+  pendingImage: null,
   authToken: localStorage.getItem('jarvis_auth_token'),
   currentUserId: localStorage.getItem('jarvis_user_id'),
   sidebarOpen: false,
   sidebarCollapsed: false,
+  selectedAgent: 'auto',
   shouldAutoScroll: true,
   streamingMessageId: 0,
+  dragDepth: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -96,8 +99,11 @@ const els = {
   sidebarHistoryList: $('sidebarHistoryList'),
   chatContainer: $('chatContainer'),
   messagesArea: $('messagesArea'),
+  messagesEnd: $('messagesEnd'),
   welcomeSplash: $('welcomeSplash'),
   messageInput: $('messageInput'),
+  agentSelect: $('agentSelect'),
+  selectedAgentBadge: $('selectedAgentBadge'),
   sendBtn: $('sendBtn'),
   micBtn: $('micBtn'),
   uploadBtn: $('uploadBtn'),
@@ -106,6 +112,12 @@ const els = {
   fileBadgeName: $('fileBadgeName'),
   fileBadgeMeta: $('fileBadgeMeta'),
   fileBadgeDismiss: $('fileBadgeDismiss'),
+  imageAttachmentBar: $('imageAttachmentBar'),
+  imageAttachmentPreview: $('imageAttachmentPreview'),
+  imageAttachmentName: $('imageAttachmentName'),
+  imageAttachmentMeta: $('imageAttachmentMeta'),
+  imageAttachmentHint: $('imageAttachmentHint'),
+  imageAttachmentDismiss: $('imageAttachmentDismiss'),
   fileModeChip: $('fileModeChip'),
   fileModeChipName: $('fileModeChipName'),
   chatTitle: $('chatTitle'),
@@ -150,12 +162,50 @@ function formatMessageTime(date = new Date()) {
   return new Date(date).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+function formatBytes(bytes = 0) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function isImageFile(file) {
+  if (!file) return false;
+  return /^image\/(png|jpeg|jpg)$/i.test(file.type) || /\.(png|jpe?g)$/i.test(file.name || '');
+}
+
+function isDocumentFile(file) {
+  if (!file) return false;
+  return /\.(pdf|txt)$/i.test(file.name || '');
+}
+
+function getInputPlaceholder() {
+  if (state.activeFile) return `Ask about "${state.activeFile.name}"...`;
+  if (state.pendingImage) return 'Ask a question about this image...';
+  if (state.selectedAgent === 'generate_image') return 'Describe the image you want Jarvis to create...';
+  return 'Message Jarvis...';
+}
+
+function getComposerHint() {
+  if (state.activeFile) return 'Document mode active. Answers will use the uploaded file.';
+  if (state.pendingImage) return 'Image attached. Send with an optional question to analyze it.';
+  if (state.selectedAgent === 'generate_image') return 'Describe the image you want. Jarvis will route this to the image generator.';
+  if (state.selectedAgent === 'analyze_image') return 'Attach an image or drop one here, then optionally ask a question.';
+  if (state.selectedAgent === 'chat') return 'Chat mode active. Text prompts will go straight to Groq.';
+  return DEFAULT_INPUT_HINT;
+}
+
 function getAgentMeta(agentType) {
   const mapping = {
-    coding: { icon: '🧠', label: 'Coding Agent' },
-    research: { icon: '🔎', label: 'Research Agent' },
-    planning: { icon: '📊', label: 'Planner Agent' },
-    debugging: { icon: '🛠️', label: 'Debug Agent' },
+    auto: { icon: '✨', label: 'Auto' },
+    chat: { icon: '💬', label: 'Chat' },
+    generate_image: { icon: '🖼️', label: 'Generate Image' },
+    analyze_image: { icon: '🔍', label: 'Analyze Image' },
   };
   return mapping[agentType] || null;
 }
@@ -172,9 +222,30 @@ function isMobileViewport() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
-function isNearBottom(el, threshold = 120) {
+function isNearBottom(el, threshold = 100) {
   if (!el) return true;
   return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+function getSelectedAgentLabel(agentType) {
+  return (
+    {
+      auto: 'Auto',
+      chat: 'Chat',
+      generate_image: 'Generate Image',
+      analyze_image: 'Analyze Image',
+    }[agentType] || 'Auto'
+  );
+}
+
+function updateSelectedAgentUi() {
+  if (els.agentSelect) els.agentSelect.value = state.selectedAgent;
+  if (!els.selectedAgentBadge) return;
+
+  const allClasses = ['agent-badge--auto', 'agent-badge--chat', 'agent-badge--generate_image', 'agent-badge--analyze_image'];
+  els.selectedAgentBadge.classList.remove(...allClasses);
+  els.selectedAgentBadge.classList.add(`agent-badge--${state.selectedAgent}`);
+  els.selectedAgentBadge.textContent = getSelectedAgentLabel(state.selectedAgent);
 }
 
 function updateInputHint(content) {
@@ -336,6 +407,63 @@ function enhanceRenderedContent(container) {
   });
 }
 
+function createImageLink(url, className = '') {
+  const link = document.createElement('a');
+  link.className = className;
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+
+function buildAnalysisPreview(url) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'message-image-preview';
+  const link = createImageLink(url, 'message-image-link');
+  const img = document.createElement('img');
+  img.className = 'message-image-thumb';
+  img.src = url;
+  img.alt = 'Uploaded image';
+  link.appendChild(img);
+  wrapper.appendChild(link);
+  return wrapper;
+}
+
+function buildGeneratedImageCard(imageUrl, metadata = {}) {
+  const card = document.createElement('div');
+  card.className = 'generated-image-card';
+
+  const previewLink = createImageLink(imageUrl, 'generated-image-link');
+  const img = document.createElement('img');
+  img.className = 'generated-image';
+  img.src = imageUrl;
+  img.alt = metadata.prompt || 'Generated image';
+  previewLink.appendChild(img);
+
+  const meta = document.createElement('div');
+  meta.className = 'generated-image-meta';
+  const prompt = document.createElement('p');
+  prompt.className = 'generated-image-prompt';
+  prompt.textContent = metadata.prompt || 'Generated image';
+
+  const actions = document.createElement('div');
+  actions.className = 'generated-image-actions';
+  const expandLink = createImageLink(imageUrl, 'generated-image-action');
+  expandLink.textContent = 'Expand';
+  const downloadLink = document.createElement('a');
+  downloadLink.className = 'generated-image-action';
+  downloadLink.href = imageUrl;
+  downloadLink.target = '_blank';
+  downloadLink.rel = 'noopener noreferrer';
+  downloadLink.download = '';
+  downloadLink.textContent = 'Download';
+  actions.append(expandLink, downloadLink);
+
+  meta.append(prompt, actions);
+  card.append(previewLink, meta);
+  return card;
+}
+
 const MessageBubble = {
   create(role, content, options = {}) {
     const isUser = role === 'user';
@@ -371,6 +499,10 @@ const MessageBubble = {
     contentEl.className = 'bubble-content';
     bubble.appendChild(contentEl);
 
+    if (options.attachmentUrl && options.messageType === 'image_analysis') {
+      bubble.insertBefore(buildAnalysisPreview(options.attachmentUrl), contentEl);
+    }
+
     let cursor = null;
     if (options.streaming) {
       bubble.classList.add('streaming');
@@ -383,6 +515,10 @@ const MessageBubble = {
     } else {
       contentEl.innerHTML = renderMarkdown(content);
       enhanceRenderedContent(contentEl);
+    }
+
+    if (options.imageUrl && options.messageType === 'image_generation') {
+      bubble.appendChild(buildGeneratedImageCard(options.imageUrl, options.messageMetadata || {}));
     }
 
     stack.append(meta, bubble);
@@ -444,8 +580,10 @@ const TypingIndicator = {
       <span class="typing-dot"></span>
     `;
     bubble._bubble.classList.remove('markdown-body');
-    els.messagesArea.appendChild(bubble);
-    ChatContainer.scrollToBottom(true);
+    const shouldStick = isNearBottom(els.messagesArea, 100);
+    els.messagesArea.insertBefore(bubble, els.messagesEnd);
+    state.shouldAutoScroll = shouldStick;
+    ChatContainer.scrollToBottom(shouldStick);
   },
   remove() {
     const el = $('typingIndicator');
@@ -458,6 +596,7 @@ const ChatContainer = {
     TypingIndicator.remove();
     els.messagesArea.innerHTML = '';
     els.messagesArea.appendChild(els.welcomeSplash);
+    els.messagesArea.appendChild(els.messagesEnd);
     els.welcomeSplash.style.display = showSplash ? '' : 'none';
     state.shouldAutoScroll = true;
   },
@@ -466,26 +605,30 @@ const ChatContainer = {
   },
   append(role, content, options = {}) {
     if (!options.keepSplashHidden) this.hideSplash();
+    const shouldStick = options.forceScroll === true || isNearBottom(els.messagesArea, 100);
     const messageEl = MessageBubble.create(role, content, options);
-    els.messagesArea.appendChild(messageEl);
+    els.messagesArea.insertBefore(messageEl, els.messagesEnd);
     if (options.forceScroll !== false) {
-      this.scrollToBottom(true);
+      state.shouldAutoScroll = shouldStick;
+      this.scrollToBottom(shouldStick, options.scrollBehavior || 'smooth');
     }
     return messageEl;
   },
-  scrollToBottom(force = false) {
-    if (force || state.shouldAutoScroll) {
-      els.messagesArea.scrollTop = els.messagesArea.scrollHeight;
-    }
+  scrollToBottom(force = false, behavior = 'smooth') {
+    if (!force && !state.shouldAutoScroll && !isNearBottom(els.messagesArea, 100)) return;
+    if (!els.messagesEnd) return;
+    els.messagesEnd.scrollIntoView({ behavior, block: 'end' });
   },
   async streamAssistant(content, options = {}) {
     this.hideSplash();
+    const shouldStick = isNearBottom(els.messagesArea, 100);
     const messageEl = MessageBubble.create('assistant', '', {
       streaming: true,
       agentType: options.agentType,
     });
-    els.messagesArea.appendChild(messageEl);
-    this.scrollToBottom(true);
+    els.messagesArea.insertBefore(messageEl, els.messagesEnd);
+    state.shouldAutoScroll = shouldStick;
+    this.scrollToBottom(shouldStick);
 
     const contentEl = messageEl._contentEl;
     const reduced = window.JarvisMotion?.prefersReducedMotion?.() ?? false;
@@ -519,7 +662,7 @@ const ChatContainer = {
 
         rendered += nextChunk.join('');
         contentEl.textContent = rendered;
-        ChatContainer.scrollToBottom();
+        ChatContainer.scrollToBottom(false);
 
         if (index >= parts.length) {
           resolve();
@@ -534,7 +677,7 @@ const ChatContainer = {
 
     contentEl.textContent = content;
     MessageBubble.finalizeStreaming(messageEl, content);
-    this.scrollToBottom(true);
+    this.scrollToBottom(false);
     return messageEl;
   },
 };
@@ -585,7 +728,10 @@ function resetAppState() {
   state.messages = [];
   state.isLoading = false;
   state.editingNoteId = null;
+  state.selectedAgent = 'auto';
   clearActiveFile();
+  clearPendingImage({ silent: true });
+  updateSelectedAgentUi();
   els.chatTitle.textContent = 'New Conversation';
   delete els.chatTitle.dataset.set;
   ChatContainer.reset({ showSplash: true });
@@ -630,11 +776,15 @@ function renderActiveMessages() {
         staggerIndex: index,
         timeLabel: formatMessageTime(message.created_at),
         agentType: message.agent_type,
+        messageType: message.message_type,
+        imageUrl: message.image_url,
+        attachmentUrl: message.attachment_url,
+        messageMetadata: message.message_metadata || {},
       })
     );
   });
-  els.messagesArea.appendChild(fragment);
-  ChatContainer.scrollToBottom(true);
+  els.messagesArea.insertBefore(fragment, els.messagesEnd);
+  ChatContainer.scrollToBottom(true, 'auto');
   updateChatHeader();
 }
 
@@ -753,24 +903,71 @@ function switchTab(tabName) {
 }
 
 function setActiveFile(file) {
+  clearPendingImage({ silent: true });
   state.activeFile = file;
   els.fileBadgeName.textContent = file.name;
   els.fileBadgeMeta.textContent = file.meta || 'Document ready';
   els.fileBadgeBar.classList.remove('hidden');
   els.fileModeChipName.textContent = file.name;
   els.fileModeChip.classList.remove('hidden');
-  els.messageInput.placeholder = `Ask about "${file.name}"…`;
   els.uploadBtn.classList.add('active');
-  updateInputHint('Document mode active. Answers will use the uploaded file.');
+  state.selectedAgent = 'auto';
+  updateSelectedAgentUi();
+  updateComposerUi();
 }
 
 function clearActiveFile() {
   state.activeFile = null;
   els.fileBadgeBar.classList.add('hidden');
   els.fileModeChip.classList.add('hidden');
-  els.messageInput.placeholder = 'Message Jarvis...';
-  els.uploadBtn.classList.remove('active');
-  updateInputHint(DEFAULT_INPUT_HINT);
+  if (!state.pendingImage) els.uploadBtn.classList.remove('active');
+  updateComposerUi();
+}
+
+function setPendingImage(file) {
+  clearActiveFile();
+  if (state.pendingImage?.previewUrl) URL.revokeObjectURL(state.pendingImage.previewUrl);
+  const previewUrl = URL.createObjectURL(file);
+  state.pendingImage = {
+    file,
+    previewUrl,
+    name: file.name,
+    size: file.size,
+    type: file.type,
+  };
+  els.imageAttachmentPreview.src = previewUrl;
+  els.imageAttachmentName.textContent = file.name;
+  els.imageAttachmentMeta.textContent = `${formatBytes(file.size)} · Ready to analyze`;
+  els.imageAttachmentHint.textContent = 'Image ready for analysis';
+  els.imageAttachmentBar.classList.remove('hidden');
+  els.uploadBtn.classList.add('active');
+  if (!['auto', 'analyze_image'].includes(state.selectedAgent)) {
+    state.selectedAgent = 'analyze_image';
+    updateSelectedAgentUi();
+  }
+  switchTab('chat');
+  updateComposerUi();
+}
+
+function clearPendingImage(options = {}) {
+  const { silent = false } = options;
+  if (state.pendingImage?.previewUrl) URL.revokeObjectURL(state.pendingImage.previewUrl);
+  state.pendingImage = null;
+  if (els.imageAttachmentPreview) els.imageAttachmentPreview.removeAttribute('src');
+  els.imageAttachmentBar.classList.add('hidden');
+  if (!state.activeFile) els.uploadBtn.classList.remove('active');
+  updateComposerUi();
+  if (!silent) showToast('Image removed.');
+}
+
+function updateComposerUi() {
+  els.messageInput.placeholder = getInputPlaceholder();
+  updateInputHint(getComposerHint());
+  if (state.pendingImage) {
+    els.imageAttachmentHint.textContent = state.selectedAgent === 'analyze_image'
+      ? 'Analyze Image mode active'
+      : 'Auto mode will analyze this image';
+  }
 }
 
 function startDocumentChat(filename) {
@@ -802,9 +999,7 @@ function startListening() {
   recognition.onspeechend = () => recognition.stop();
 
   recognition.onend = () => {
-    els.messageInput.placeholder = state.activeFile
-      ? `Ask about "${state.activeFile.name}"…`
-      : 'Message Jarvis...';
+    updateComposerUi();
     els.micBtn.classList.remove('is-listening');
   };
 
@@ -850,18 +1045,26 @@ async function sendMessage() {
   }
 
   const content = els.messageInput.value.trim();
-  if (!content || state.isLoading) return;
+  if ((!content && !state.pendingImage) || state.isLoading) return;
 
   ChatContainer.hideSplash();
   InputBar.setLoading(true);
   els.messageInput.value = '';
   autoResizeTextarea();
   let chatId = state.activeChatId;
+  const pendingImage = state.pendingImage
+    ? { ...state.pendingImage, file: state.pendingImage.file, previewUrl: state.pendingImage.previewUrl }
+    : null;
+  const hasPendingImage = Boolean(pendingImage);
+  const requestMode = hasPendingImage ? state.selectedAgent || 'auto' : state.selectedAgent || 'auto';
+  const optimisticMessageType = hasPendingImage ? 'image_analysis' : requestMode === 'generate_image' ? 'image_generation' : 'text';
   const optimisticMessage = {
     id: `temp-user-${Date.now()}`,
     chat_id: chatId,
     role: 'user',
-    content,
+    content: content || 'Analyze this image.',
+    message_type: optimisticMessageType,
+    attachment_url: hasPendingImage ? pendingImage.previewUrl : null,
     created_at: new Date().toISOString(),
   };
 
@@ -879,14 +1082,35 @@ async function sendMessage() {
 
     optimisticMessage.chat_id = chatId;
     state.messages.push(optimisticMessage);
-    ChatContainer.append('user', content);
+    ChatContainer.append('user', optimisticMessage.content, {
+      forceScroll: true,
+      messageType: optimisticMessage.message_type,
+      attachmentUrl: optimisticMessage.attachment_url,
+    });
     TypingIndicator.show();
-    updateInputHint(state.activeFile ? 'Searching document...' : 'Jarvis is thinking...');
+    updateInputHint(
+      state.activeFile
+        ? 'Searching document...'
+        : hasPendingImage
+          ? 'Analyzing image...'
+          : requestMode === 'generate_image'
+            ? 'Generating image...'
+            : 'Jarvis is thinking...'
+    );
 
-    const payload = { content };
-    if (state.activeFile) payload.file_id = state.activeFile.id;
-
-    const data = await API.post(`/chat/${chatId}/message`, payload);
+    let data;
+    if (hasPendingImage) {
+      const formData = new FormData();
+      formData.append('content', content);
+      formData.append('request_mode', requestMode);
+      formData.append('selected_agent', 'auto');
+      formData.append('image', pendingImage.file);
+      data = await API.upload(`/chat/${chatId}/message/multimodal`, formData);
+    } else {
+      const payload = { content, selected_agent: 'auto', request_mode: requestMode };
+      if (state.activeFile) payload.file_id = state.activeFile.id;
+      data = await API.post(`/chat/${chatId}/message`, payload);
+    }
     state.activeChatId = data.chat_id;
     state.messages[state.messages.length - 1].id = data.user_message_id;
 
@@ -897,9 +1121,26 @@ async function sendMessage() {
       role: 'assistant',
       agent_type: data.agent_type,
       content: data.reply,
+      message_type: data.message_type,
+      image_url: data.image_url,
+      attachment_url: data.attachment_url,
+      provider: data.provider,
+      message_metadata: data.metadata || {},
       created_at: new Date().toISOString(),
     });
-    await ChatContainer.streamAssistant(data.reply, { agentType: data.agent_type });
+    if (data.message_type === 'text') {
+      await ChatContainer.streamAssistant(data.reply, { agentType: data.agent_type });
+    } else {
+      ChatContainer.append('assistant', data.reply, {
+        forceScroll: true,
+        agentType: data.agent_type,
+        messageType: data.message_type,
+        imageUrl: data.image_url,
+        attachmentUrl: data.attachment_url,
+        messageMetadata: data.metadata || {},
+      });
+    }
+    if (hasPendingImage) clearPendingImage({ silent: true });
     await refreshConversationLists().catch(() => {});
     updateChatHeader();
   } catch (err) {
@@ -913,7 +1154,7 @@ async function sendMessage() {
     showToast(err.message || 'Failed to send message.', 'error');
   } finally {
     InputBar.setLoading(false);
-    updateInputHint(state.activeFile ? 'Document mode active. Answers will use the uploaded file.' : DEFAULT_INPUT_HINT);
+    updateComposerUi();
     InputBar.focus();
   }
 }
@@ -931,7 +1172,10 @@ async function createNewChat(options = {}) {
     const chat = await API.post('/chat/create', { title: 'New Chat' });
     state.activeChatId = chat.id;
     state.messages = [];
-    if (clearFile) clearActiveFile();
+    if (clearFile) {
+      clearActiveFile();
+      clearPendingImage({ silent: true });
+    }
     state.chats = [chat, ...state.chats.filter((entry) => entry.id !== chat.id)];
     renderSidebarHistory(state.chats);
     renderHistory(state.chats);
@@ -1057,6 +1301,7 @@ async function loadConversation(id) {
   if (!state.authToken) return;
 
   try {
+    clearPendingImage({ silent: true });
     const chatId = parseInt(id, 10);
     state.activeChatId = chatId;
     if (!state.chats.some((chat) => chat.id === chatId)) {
@@ -1103,6 +1348,7 @@ async function deleteConversation(id) {
       state.activeChatId = null;
       state.messages = [];
       clearActiveFile();
+      clearPendingImage({ silent: true });
       renderActiveMessages();
     }
     renderSidebarHistory(state.chats);
@@ -1256,7 +1502,7 @@ els.fileInput.addEventListener('change', async () => {
   if (!state.authToken) {
     els.fileInput.value = '';
     updateAuthUi();
-    setAuthMessage('Please log in to upload a document.', 'error');
+    setAuthMessage('Please log in to attach a file or image.', 'error');
     return;
   }
 
@@ -1264,9 +1510,20 @@ els.fileInput.addEventListener('change', async () => {
   if (!file) return;
   els.fileInput.value = '';
 
-  const ext = file.name.split('.').pop().toLowerCase();
-  if (!['pdf', 'txt'].includes(ext)) {
-    showToast('Only PDF and TXT files are supported.', 'error');
+  if (isImageFile(file)) {
+    const maxMb = 8;
+    if (file.size > maxMb * 1024 * 1024) {
+      showToast(`Image too large (max ${maxMb} MB).`, 'error');
+      return;
+    }
+    setPendingImage(file);
+    showToast(`"${file.name}" is ready for image analysis.`, 'success');
+    InputBar.focus();
+    return;
+  }
+
+  if (!isDocumentFile(file)) {
+    showToast('Only PDF, TXT, JPG, and PNG files are supported.', 'error');
     return;
   }
 
@@ -1293,11 +1550,11 @@ els.fileInput.addEventListener('change', async () => {
     startDocumentChat(data.filename);
     showToast(`"${data.filename}" is ready for document chat.`, 'success');
   } catch (err) {
-    updateInputHint(state.activeFile ? 'Document mode active.' : DEFAULT_INPUT_HINT);
+    updateComposerUi();
     showToast(err.message || 'Upload failed.', 'error');
   } finally {
     els.uploadBtn.classList.remove('uploading');
-    els.uploadBtn.title = 'Upload PDF or TXT';
+    els.uploadBtn.title = 'Upload a document or image';
   }
 });
 
@@ -1306,9 +1563,24 @@ els.fileBadgeDismiss.addEventListener('click', () => {
   showToast('Document removed. Back to normal chat.');
 });
 
+els.imageAttachmentDismiss.addEventListener('click', () => {
+  clearPendingImage();
+});
+
 if (els.micBtn) els.micBtn.addEventListener('click', startListening);
 
 els.sendBtn.addEventListener('click', sendMessage);
+els.agentSelect.addEventListener('change', (event) => {
+  state.selectedAgent = event.target.value || 'auto';
+  if (state.activeFile && ['generate_image', 'analyze_image'].includes(state.selectedAgent)) {
+    clearActiveFile();
+  }
+  if (state.pendingImage && !['auto', 'analyze_image'].includes(state.selectedAgent)) {
+    clearPendingImage({ silent: true });
+  }
+  updateSelectedAgentUi();
+  updateComposerUi();
+});
 els.messageInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
@@ -1318,6 +1590,41 @@ els.messageInput.addEventListener('keydown', (event) => {
 els.messageInput.addEventListener('input', autoResizeTextarea);
 els.messagesArea.addEventListener('scroll', () => {
   state.shouldAutoScroll = isNearBottom(els.messagesArea);
+});
+
+els.chatContainer.addEventListener('dragenter', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  state.dragDepth += 1;
+  els.chatContainer.classList.add('drag-active');
+});
+
+els.chatContainer.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  els.chatContainer.classList.add('drag-active');
+});
+
+['dragleave', 'dragend'].forEach((eventName) => {
+  els.chatContainer.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.dragDepth = Math.max(0, state.dragDepth - 1);
+    if (state.dragDepth === 0) els.chatContainer.classList.remove('drag-active');
+  });
+});
+
+els.chatContainer.addEventListener('drop', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  state.dragDepth = 0;
+  els.chatContainer.classList.remove('drag-active');
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  els.fileInput.files = transfer.files;
+  els.fileInput.dispatchEvent(new Event('change'));
 });
 
 document.querySelectorAll('.chip').forEach((chip) => {
@@ -1382,9 +1689,10 @@ window.addEventListener('DOMContentLoaded', () => {
   else requestAnimationFrame(() => document.body.classList.add('app-ready'));
 
   Sidebar.sync();
+  updateSelectedAgentUi();
   updateAuthUi();
   setAuthMode('login');
-  updateInputHint(DEFAULT_INPUT_HINT);
+  updateComposerUi();
   checkHealth();
 
   verifyStoredSession().then(async (authenticated) => {

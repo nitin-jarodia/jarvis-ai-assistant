@@ -1,7 +1,7 @@
 """Pydantic schemas for request/response validation in Jarvis AI Assistant."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -57,7 +57,13 @@ class MessageCreate(BaseModel):
     chat_id: int
     role: str = Field(..., pattern="^(user|assistant)$")
     agent_type: Optional[str] = Field(default=None, pattern="^(coding|research|planning|debugging)?$")
-    content: str = Field(..., min_length=1)
+    content: str = Field(default="")
+    message_type: Literal["text", "image_generation", "image_analysis"] = "text"
+    image_url: Optional[str] = None
+    attachment_url: Optional[str] = None
+    provider: Optional[str] = None
+    response_type: Optional[str] = None
+    metadata_json: Optional[str] = None
 
 
 class MessageOut(BaseModel):
@@ -66,14 +72,25 @@ class MessageOut(BaseModel):
     role: str
     agent_type: Optional[str] = None
     content: str
+    message_type: str = "text"
+    image_url: Optional[str] = None
+    attachment_url: Optional[str] = None
+    provider: Optional[str] = None
+    response_type: Optional[str] = None
+    message_metadata: Optional[dict[str, Any]] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 class ChatMessageRequest(BaseModel):
-    content: str = Field(..., min_length=1, description="User message to Jarvis")
+    content: str = Field(default="", description="User message to Jarvis")
     file_id: Optional[str] = None
+    selected_agent: str = Field(default="auto", pattern="^(auto|coding|research|planning|debugging)$")
+    request_mode: Literal["auto", "chat", "generate_image", "analyze_image"] = "auto"
+    style: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    size: Optional[str] = None
 
 
 class ChatMessageResponse(BaseModel):
@@ -83,11 +100,20 @@ class ChatMessageResponse(BaseModel):
     assistant_message_id: int
     agent_type: Optional[str] = None
     model: Optional[str] = None
+    message_type: Literal["text", "image_generation", "image_analysis"] = "text"
+    provider: Optional[str] = None
+    response_type: Optional[str] = None
+    image_url: Optional[str] = None
+    attachment_url: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+    structured_notes: Optional[dict[str, Any]] = None
 
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User message to Jarvis")
     conversation_id: Optional[int] = None
+    selected_agent: str = Field(default="auto", pattern="^(auto|coding|research|planning|debugging)$")
+    request_mode: Literal["auto", "chat", "generate_image", "analyze_image"] = "auto"
 
 
 class ChatResponse(BaseModel):
@@ -96,6 +122,12 @@ class ChatResponse(BaseModel):
     message_id: int
     agent_type: Optional[str] = None
     model: Optional[str] = None
+    message_type: Literal["text", "image_generation", "image_analysis"] = "text"
+    provider: Optional[str] = None
+    response_type: Optional[str] = None
+    image_url: Optional[str] = None
+    attachment_url: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 class NoteCreate(BaseModel):
@@ -140,3 +172,29 @@ class FileDocumentOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ImageGenerationRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    style: Optional[str] = Field(default=None, max_length=255)
+    aspect_ratio: Optional[str] = Field(default=None, max_length=20)
+    size: Optional[str] = Field(default=None, max_length=20)
+
+
+class ImageGenerationResponse(BaseModel):
+    response_type: Literal["image_generation"] = "image_generation"
+    prompt: str
+    image_url: Optional[str] = None
+    provider: str
+    model: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+
+
+class ImageAnalysisResponse(BaseModel):
+    response_type: Literal["image_analysis"] = "image_analysis"
+    analysis: str
+    attachment_url: Optional[str] = None
+    provider: str
+    model: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+    structured_notes: Optional[dict[str, Any]] = None
