@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full min-h-0;
+  }
+  body {
+    @apply bg-jarvis-bg text-jarvis-fg font-sans text-[15px] leading-relaxed;
+    background-image: radial-gradient(
+        ellipse 80% 50% at 20% -10%,
+        rgba(56, 189, 248, 0.14),
+        transparent 50%
+      ),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(167, 139, 250, 0.12), transparent 45%),
+      radial-gradient(ellipse 50% 30% at 50% 100%, rgba(251, 191, 36, 0.06), transparent 50%);
+    background-attachment: fixed;
+  }
+}
+
+/* Subtle grid + noise overlay (pseudo via fixed div in layout) */
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-500/25 hover:bg-slate-400/35;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Assistant markdown */
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 0.75em;
+}
+.markdown-body pre {
+  margin: 0;
+  overflow-x: auto;
+}
+.markdown-body code:not(pre code) {
+  border-radius: 0.375rem;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 0.15em 0.45em;
+  font-size: 0.9em;
+  color: rgb(251 191 36 / 0.95);
+}
+.markdown-body a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-body blockquote {
+  margin: 0.75em 0;
+  border-left: 3px solid rgb(56 189 248 / 0.5);
+  padding-left: 1em;
+  color: rgb(148 163 184);
+}

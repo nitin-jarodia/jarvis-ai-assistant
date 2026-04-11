@@ -1,99 +1,95 @@
 # ⚡ Jarvis AI Assistant
 
-A clean, full-stack AI assistant application with a **FastAPI** backend, vanilla **HTML/CSS/JS** frontend, and **SQLite** database.
+A full-stack AI assistant with a **FastAPI** backend, **React + Vite + Tailwind** frontend, and **SQLite** database.
 
 ## 🗂️ Project Structure
 
 ```
 JARVIS AI/
-├── backend/
-│   ├── __init__.py       # Package init
-│   ├── main.py           # FastAPI app & all routes
-│   ├── database.py       # SQLite connection (SQLAlchemy)
-│   ├── models.py         # ORM Models (Conversations, Messages, Notes)
-│   ├── schemas.py        # Pydantic request/response schemas
-│   └── crud.py           # Database CRUD operations
-│
+├── backend/           # FastAPI app, auth, chat, notes, uploads
 ├── frontend/
-│   ├── index.html        # Main UI shell
-│   └── static/
-│       ├── css/
-│       │   └── style.css # Premium dark glassmorphism UI
-│       └── js/
-│           └── app.js    # Frontend logic & API calls
-│
-├── jarvis.db             # SQLite database (auto-created on first run)
-├── run.py                # Convenience startup script
-├── requirements.txt      # Python dependencies
-└── .env.example          # Environment variable template
+│   ├── src/           # React UI (premium dashboard)
+│   ├── dist/          # Production build output (run `npm run build`)
+│   ├── package.json
+│   └── vite.config.ts
+├── frontend/_legacy/  # Previous vanilla static UI (optional reference)
+├── jarvis.db
+├── run.py
+├── requirements.txt
+└── .env.example
 ```
 
 ## 🚀 Quick Start
 
-### 1. Install dependencies
+### 1. Backend
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Run the server
+Copy `.env.example` to `.env` and set at least `SECRET_KEY` (and `GROQ_API_KEY` for AI).
+
+### 2. Frontend (production)
+
+From the `frontend` folder:
 
 ```bash
-
-
+cd frontend
+npm install
+npm run build
 ```
 
-Or directly with uvicorn:
+This writes `frontend/dist/`, which the backend serves at **`/app`**.
+
+### 3. Run the server
 
 ```bash
 uvicorn backend.main:app --reload
 ```
 
-### 3. Open the app
+Or:
 
-Visit [http://127.0.0.1:8000/app](http://127.0.0.1:8000/app) in your browser.
-The API root at [http://127.0.0.1:8000](http://127.0.0.1:8000) returns a lightweight status response.
-
-### 4. API Docs
-
-FastAPI auto-generates interactive docs at:
-- **Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **ReDoc**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-
-## 🤖 Adding a Real AI Model
-
-The reply logic lives in `backend/main.py` inside the `generate_reply()` function. Swap it with any AI provider:
-
-```python
-# Example: OpenAI
-import openai
-def generate_reply(message: str) -> str:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": message}]
-    )
-    return response.choices[0].message.content
+```bash
+python run.py
 ```
 
-## 📡 API Overview
+Open [http://127.0.0.1:8000/app](http://127.0.0.1:8000/app).
+
+### Frontend development (hot reload)
+
+With the backend on `http://127.0.0.1:8000`:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open the URL Vite prints (e.g. `http://127.0.0.1:5173/app`). API calls are proxied to the FastAPI server.
+
+### API docs
+
+- Swagger: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- ReDoc: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
+
+## 🤖 AI / chat logic
+
+Reply and routing logic lives in `backend/main.py` (e.g. `_generate_chat_reply` and related helpers), not in a single `generate_reply()` stub.
+
+## 📡 API overview
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/` | Lightweight server status |
-| GET | `/api/health` | Health check |
-| POST | `/api/chat` | Send a message to Jarvis |
-| GET | `/api/conversations` | List conversations |
-| POST | `/api/conversations` | Create conversation |
-| GET | `/api/conversations/{id}/messages` | Get messages |
-| GET | `/api/notes` | List notes |
-| POST | `/api/notes` | Create note |
-| PATCH | `/api/notes/{id}` | Update note |
-| DELETE | `/api/notes/{id}` | Delete note |
+| GET | `/` | Server status |
+| GET | `/api/health` | Health + AI/provider status |
+| POST | `/login`, `/register` | Auth (JWT) |
+| GET | `/protected` | Current user id |
+| GET/POST | `/api/chats`, `/api/chat/...` | Chats & messages |
+| PATCH | `/api/conversations/{id}` | Update chat (e.g. rename) |
+| GET/POST/PATCH/DELETE | `/api/notes` | Notes |
 
-## 🛠️ Tech Stack
+## 🛠️ Tech stack
 
-- **Backend**: Python 3.10+, FastAPI, SQLAlchemy, Pydantic v2
-- **Database**: SQLite (file: `jarvis.db`)
-- **Frontend**: HTML5, Vanilla CSS (glassmorphism), Vanilla JS (ES2020+)
-- **Server**: Uvicorn (ASGI)
+- **Backend**: Python 3.10+, FastAPI, SQLAlchemy, Pydantic v2, Uvicorn  
+- **Database**: SQLite (`jarvis.db`)  
+- **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 3  
+- **Markdown / code**: `marked`, `dompurify`, `highlight.js`

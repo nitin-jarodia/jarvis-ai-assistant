@@ -78,11 +78,15 @@ app = FastAPI(
 )
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
-STATIC_DIR   = os.path.join(FRONTEND_DIR, "static")
+DIST_DIR = os.path.join(FRONTEND_DIR, "dist")
+LEGACY_STATIC = os.path.join(FRONTEND_DIR, "_legacy", "static")
 media_store.ensure_media_dirs()
 MEDIA_DIR = str(media_store.MEDIA_ROOT)
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+# Legacy vanilla UI assets (optional), for old bookmarks under /static/*
+if os.path.isdir(LEGACY_STATIC):
+    app.mount("/static", StaticFiles(directory=LEGACY_STATIC), name="static")
+
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 
 app.add_middleware(
@@ -96,7 +100,8 @@ app.add_middleware(
 @app.middleware("http")
 async def disable_frontend_caching(request, call_next):
     response = await call_next(request)
-    if request.url.path == "/app" or request.url.path.startswith("/static/"):
+    path = request.url.path
+    if path == "/app" or path.startswith("/app/") or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -118,9 +123,28 @@ def protected_route(current_user_id: int = Depends(get_current_user)):
     return schemas.ProtectedResponse(user_id=current_user_id)
 
 
-@app.get("/app", include_in_schema=False)
-async def serve_frontend():
-    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+# React SPA (Vite build): served from /app with client-side assets under /app/assets/*
+if os.path.isdir(DIST_DIR) and os.path.isfile(os.path.join(DIST_DIR, "index.html")):
+    app.mount("/app", StaticFiles(directory=DIST_DIR, html=True), name="frontend_spa")
+else:
+    logger.warning(
+        "Frontend build not found at %s — run `npm install` and `npm run build` in frontend/",
+        DIST_DIR,
+    )
+
+    @app.get("/app", include_in_schema=False)
+    async def serve_frontend_missing_build():
+        from fastapi.responses import HTMLResponse
+
+        return HTMLResponse(
+            "<html><body style='font-family:system-ui;padding:2rem;background:#0f172a;color:#e2e8f0'>"
+            "<h1>Jarvis UI not built</h1>"
+            "<p>From the project root, run:</p>"
+            "<pre style='background:#1e293b;padding:1rem;border-radius:8px'>cd frontend\nnpm install\nnpm run build</pre>"
+            "<p>Then restart the server and open <code>/app</code> again.</p>"
+            "</body></html>",
+            status_code=503,
+        )
 
 
 # ─── Health ───────────────────────────────────────────────────────────────────
