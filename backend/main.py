@@ -9,12 +9,13 @@ import json
 import os
 import uuid
 import logging
+import threading
 from contextlib import asynccontextmanager
 from typing import List
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -237,6 +238,141 @@ def _get_owned_file(db: Session, user_id: int, file_id: str):
     if not file_doc:
         raise HTTPException(status_code=404, detail="File not found.")
     return file_doc
+
+
+def _sse_event(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+async def _prepare_stream_text_reply(
+    *,
+    db: Session,
+    user_id: int,
+    chat,
+    content: str,
+    file_id: str | None = None,
+    selected_agent: str = "auto",
+    request_mode: str = "auto",
+) -> dict | None:
+    normalized_content = content.strip()
+    normalized_request_mode = ai_router.normalize_mode(request_mode)
+    target_file_id = (
+        (file_id or chat.document_file_id)
+        if normalized_request_mode not in {ROUTE_MODE_GENERATE_IMAGE, ROUTE_MODE_ANALYZE_IMAGE}
+        else None
+    )
+    file_doc = None
+
+    if target_file_id:
+        file_doc = _get_owned_file(db, user_id, target_file_id)
+        if chat.document_file_id and chat.document_file_id != target_file_id:
+            raise HTTPException(status_code=400, detail="This chat is linked to a different document.")
+        if not chat.document_file_id:
+            chat = crud.update_chat(
+                db,
+                chat,
+                schemas.ChatUpdate(
+                    document_file_id=file_doc.file_id,
+                    document_filename=file_doc.filename,
+                ),
+            )
+
+    if file_doc:
+        if not normalized_content:
+            raise HTTPException(status_code=400, detail="A question is required for document chat.")
+
+        user_msg = crud.create_message(
+            db,
+            schemas.MessageCreate(
+                chat_id=chat.id,
+                role="user",
+                content=normalized_content,
+                message_type=MESSAGE_TYPE_TEXT,
+                response_type=MESSAGE_TYPE_TEXT,
+            ),
+        )
+        existing = crud.get_chat_messages(db, chat.id)
+        history = _recent_history(existing[:-1], limit=15)
+
+        chunk_rows = crud.get_file_chunks(db, file_doc.file_id)
+        if not chunk_rows:
+            raise HTTPException(
+                status_code=500,
+                detail="Document chunks are missing. Please upload the file again.",
+            )
+
+        chunk_texts = [chunk.content for chunk in chunk_rows]
+        retrieval_query = await asyncio.to_thread(
+            file_service.build_retrieval_query,
+            content,
+            history,
+        )
+        relevant_chunks = await asyncio.to_thread(
+            file_service.retrieve_chunks,
+            retrieval_query,
+            chunk_texts,
+            5,
+        )
+        context_block = file_service.format_chunks_for_prompt(relevant_chunks)
+        groq_messages = [
+            {"role": "system", "content": FILE_CHAT_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": f"Document: {file_doc.filename}\n\nContext:\n{context_block}",
+            },
+            *history,
+            {"role": "user", "content": content},
+        ]
+        return {
+            "chat": chat,
+            "user_msg": user_msg,
+            "groq_messages": groq_messages,
+            "failure_message": "I couldn't analyze the document right now. Please try again.",
+            "agent_type": None,
+            "response_metadata": {"document_filename": file_doc.filename},
+            "response_model": ai_service.MODEL_NAME,
+            "provider_name": "groq",
+        }
+
+    decision = ai_router.decide_route(
+        mode=normalized_request_mode,
+        text=normalized_content,
+        has_image_attachment=False,
+    )
+    if decision.mode != ROUTE_MODE_CHAT:
+        return None
+
+    if not normalized_content:
+        raise HTTPException(status_code=400, detail="Message content is required for chat.")
+
+    user_msg = crud.create_message(
+        db,
+        schemas.MessageCreate(
+            chat_id=chat.id,
+            role="user",
+            content=normalized_content,
+            message_type=MESSAGE_TYPE_TEXT,
+            response_type=MESSAGE_TYPE_TEXT,
+        ),
+    )
+    existing = crud.get_chat_messages(db, chat.id)
+    history = _recent_history(existing[:-1], limit=15)
+    agent_type, groq_messages = await asyncio.to_thread(
+        ai_service.prepare_agent_messages,
+        user_input=normalized_content,
+        history=history,
+        selected_agent=selected_agent,
+    )
+    return {
+        "chat": chat,
+        "user_msg": user_msg,
+        "groq_messages": groq_messages,
+        "failure_message": "I couldn't generate a response right now. Please try again.",
+        "agent_type": agent_type,
+        "response_metadata": {"route_reason": decision.reason},
+        "response_model": ai_service.MODEL_NAME,
+        "provider_name": "groq",
+    }
 
 
 async def _generate_chat_reply(
@@ -565,6 +701,174 @@ async def post_chat_message(
         aspect_ratio=payload.aspect_ratio,
         size=payload.size,
     )
+
+
+@app.post("/api/chat/{chat_id}/message/stream", tags=["Chat"])
+async def stream_chat_message(
+    chat_id: int,
+    payload: schemas.ChatMessageRequest,
+    request: Request,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    chat = _get_owned_chat(db, current_user_id, chat_id)
+    stream_context = await _prepare_stream_text_reply(
+        db=db,
+        user_id=current_user_id,
+        chat=chat,
+        content=payload.content,
+        file_id=payload.file_id,
+        selected_agent=payload.selected_agent,
+        request_mode=payload.request_mode,
+    )
+
+    headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Accel-Buffering": "no",
+    }
+
+    if stream_context is None:
+        result = await _generate_chat_reply(
+            db=db,
+            user_id=current_user_id,
+            chat=chat,
+            content=payload.content,
+            file_id=payload.file_id,
+            selected_agent=payload.selected_agent,
+            request_mode=payload.request_mode,
+            style=payload.style,
+            aspect_ratio=payload.aspect_ratio,
+            size=payload.size,
+        )
+
+        async def single_result_stream():
+            yield _sse_event(
+                "start",
+                {
+                    "chat_id": result.chat_id,
+                    "user_message_id": result.user_message_id,
+                    "message_type": result.message_type,
+                    "agent_type": result.agent_type,
+                },
+            )
+            yield _sse_event("final", result.model_dump())
+
+        return StreamingResponse(single_result_stream(), media_type="text/event-stream", headers=headers)
+
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+        parts: list[str] = []
+        stop_event = threading.Event()
+        client_disconnected = False
+
+        def producer():
+            try:
+                for delta in ai_service.stream_response_from_messages(
+                    stream_context["groq_messages"],
+                    stream_context["failure_message"],
+                    stop_event=stop_event,
+                ):
+                    parts.append(delta)
+                    loop.call_soon_threadsafe(queue.put_nowait, ("chunk", delta))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+        yield _sse_event(
+            "start",
+            {
+                "chat_id": stream_context["chat"].id,
+                "user_message_id": stream_context["user_msg"].id,
+                "message_type": MESSAGE_TYPE_TEXT,
+                "agent_type": stream_context["agent_type"],
+                "provider": stream_context["provider_name"],
+                "model": stream_context["response_model"],
+            },
+        )
+
+        producer_thread = threading.Thread(target=producer, daemon=True)
+        producer_thread.start()
+
+        try:
+            while True:
+                kind, payload_text = await queue.get()
+                if await request.is_disconnected():
+                    client_disconnected = True
+                    stop_event.set()
+                    break
+                if kind == "chunk" and payload_text:
+                    yield _sse_event("chunk", {"delta": payload_text})
+                    if await request.is_disconnected():
+                        client_disconnected = True
+                        stop_event.set()
+                        break
+                    continue
+                break
+        except asyncio.CancelledError:
+            client_disconnected = True
+            stop_event.set()
+
+        reply = "".join(parts).strip() or stream_context["failure_message"]
+        assistant_msg = None
+        if reply:
+            assistant_msg = crud.create_message(
+                db,
+                schemas.MessageCreate(
+                    chat_id=stream_context["chat"].id,
+                    role="assistant",
+                    agent_type=stream_context["agent_type"],
+                    content=reply,
+                    message_type=MESSAGE_TYPE_TEXT,
+                    provider=stream_context["provider_name"],
+                    response_type=MESSAGE_TYPE_TEXT,
+                    metadata_json=_metadata_json(
+                        {
+                            **stream_context["response_metadata"],
+                            "stopped": client_disconnected,
+                        }
+                    ),
+                ),
+            )
+
+        current_chat = _get_owned_chat(db, current_user_id, stream_context["chat"].id)
+
+        if current_chat.title == DEFAULT_CHAT_TITLE:
+            chat_after = crud.update_chat(
+                db,
+                current_chat,
+                schemas.ChatUpdate(
+                    title=_chat_title_from_message(
+                        payload.content or "New chat",
+                        current_chat.document_filename,
+                    )
+                ),
+            )
+        else:
+            chat_after = crud.touch_chat(db, current_chat)
+
+        if client_disconnected:
+            return
+
+        result = schemas.ChatMessageResponse(
+            reply=reply,
+            chat_id=chat_after.id,
+            user_message_id=stream_context["user_msg"].id,
+            assistant_message_id=assistant_msg.id if assistant_msg else 0,
+            agent_type=stream_context["agent_type"],
+            model=stream_context["response_model"],
+            message_type=MESSAGE_TYPE_TEXT,
+            provider=stream_context["provider_name"],
+            response_type=MESSAGE_TYPE_TEXT,
+            image_url=None,
+            attachment_url=None,
+            metadata={**stream_context["response_metadata"], "stopped": False},
+            structured_notes=None,
+        )
+        yield _sse_event("final", result.model_dump())
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.post("/api/chat/{chat_id}/message/multimodal", response_model=schemas.ChatMessageResponse, tags=["Chat"])

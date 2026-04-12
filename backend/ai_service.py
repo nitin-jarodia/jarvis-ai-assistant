@@ -9,6 +9,8 @@ import logging
 import os
 import re
 import time
+from collections.abc import Iterator
+from threading import Event
 from functools import lru_cache
 from pathlib import Path
 
@@ -159,6 +161,108 @@ def generate_response_from_messages(
         return failure_message or "An unexpected error occurred. Please try again."
 
 
+def stream_response_from_messages(
+    messages: list[dict[str, str]],
+    failure_message: str | None = None,
+    *,
+    max_tokens: int = 2048,
+    temperature: float = 0.5,
+    stop_event: Event | None = None,
+) -> Iterator[str]:
+    """Yield streamed text deltas from Groq, falling back to a final message on failure."""
+    client = _ensure_client()
+    fallback = failure_message or "I could not generate a response right now. Please try again."
+    if client is None:
+        logger.error("Cannot call Groq API: GROQ_API_KEY is missing.")
+        yield "Jarvis is not configured. Please set the GROQ_API_KEY in your .env file."
+        return
+
+    start_time = time.time()
+    parts: list[str] = []
+
+    try:
+        stream = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+
+        for chunk in stream:
+            if stop_event and stop_event.is_set():
+                close_stream = getattr(stream, "close", None)
+                if callable(close_stream):
+                    try:
+                        close_stream()
+                    except Exception:
+                        pass
+                break
+            delta = ""
+            if getattr(chunk, "choices", None):
+                delta = chunk.choices[0].delta.content or ""
+            if delta:
+                parts.append(delta)
+                yield delta
+
+        reply = "".join(parts).strip()
+        elapsed = time.time() - start_time
+        logger.info(
+            "Groq streamed response | model=%s | chars=%d | time=%.2fs",
+            MODEL_NAME,
+            len(reply),
+            elapsed,
+        )
+        if not reply:
+            yield fallback
+
+    except APITimeoutError:
+        elapsed = time.time() - start_time
+        logger.error("Groq stream timed out after %.2fs", elapsed)
+        if parts:
+            return
+        yield "The AI request timed out. Please try again."
+
+    except APIConnectionError as exc:
+        elapsed = time.time() - start_time
+        logger.error("Groq stream connection error after %.2fs: %s", elapsed, exc)
+        if parts:
+            return
+        yield "Could not reach the AI service. Please try again."
+
+    except APIStatusError as e:
+        elapsed = time.time() - start_time
+        status_code = e.status_code
+
+        if status_code == 401:
+            logger.error("Groq authentication failed during stream (401). Check your GROQ_API_KEY.")
+            if not parts:
+                yield "Authentication failed. Please check your GROQ_API_KEY."
+            return
+
+        if status_code == 429:
+            logger.warning("Groq rate limit hit during stream (429).")
+            if not parts:
+                yield "I'm receiving too many requests right now. Please wait a moment and try again."
+            return
+
+        if status_code in (502, 503, 504):
+            logger.error("Groq stream server error (%d). Elapsed: %.2fs", status_code, elapsed)
+            if not parts:
+                yield "The AI service is temporarily unavailable. Please try again shortly."
+            return
+
+        logger.error("Groq stream API error %d: %s", status_code, e.message)
+        if not parts:
+            yield f"An API error occurred (code {status_code}). Please try again."
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error("Unexpected error during Groq stream (%.2fs): %s", elapsed, e)
+        if not parts:
+            yield fallback
+
+
 def generateResponse(
     messages: list[dict[str, str]],
     failure_message: str | None = None,
@@ -227,16 +331,13 @@ def build_agent_system_prompt(agent_type: str) -> str:
     return AGENT_SYSTEM_PROMPTS.get(agent_type, AGENT_SYSTEM_PROMPTS["research"])
 
 
-def generate_agent_response(
+def prepare_agent_messages(
     *,
     user_input: str,
     history: list[dict[str, str]] | None = None,
     selected_agent: str = "auto",
-) -> tuple[str, str]:
-    """
-    Route to the selected specialist agent.
-    Manual agent selection uses a single Groq call. Auto routing uses a cheap classifier first.
-    """
+) -> tuple[str, list[dict[str, str]]]:
+    """Resolve the active agent and return the final Groq message list."""
     normalized_selection = _normalize_selected_agent(selected_agent)
     agent_type = (
         normalized_selection
@@ -247,6 +348,24 @@ def generate_agent_response(
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_input})
+    return agent_type, messages
+
+
+def generate_agent_response(
+    *,
+    user_input: str,
+    history: list[dict[str, str]] | None = None,
+    selected_agent: str = "auto",
+) -> tuple[str, str]:
+    """
+    Route to the selected specialist agent.
+    Manual agent selection uses a single Groq call. Auto routing uses a cheap classifier first.
+    """
+    agent_type, messages = prepare_agent_messages(
+        user_input=user_input,
+        history=history,
+        selected_agent=selected_agent,
+    )
     reply = generateResponse(
         messages,
         failure_message="I couldn't generate a response right now. Please try again.",

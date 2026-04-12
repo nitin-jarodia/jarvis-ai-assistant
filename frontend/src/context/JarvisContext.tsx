@@ -8,13 +8,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, ApiError } from "../lib/api";
-import { streamAssistantText } from "../lib/streamAssistant";
+import { api, ApiError, StreamAbortError } from "../lib/api";
 import { getArchivedChatIds, getPinnedChatIds, toggleArchivedChatId, togglePinnedChatId } from "../lib/storage";
 import type {
   ActiveFile,
   AgentMode,
   Chat,
+  ChatStreamChunk,
+  ChatStreamStart,
   HealthResponse,
   Message,
   Note,
@@ -82,6 +83,7 @@ type JarvisContextValue = {
   activeChatId: number | null;
   messages: UiMessage[];
   isSending: boolean;
+  isStreamingResponse: boolean;
   selectedAgent: AgentMode;
   setSelectedAgent: (a: AgentMode) => void;
   activeFile: ActiveFile | null;
@@ -91,6 +93,7 @@ type JarvisContextValue = {
   deleteConversation: (id: number) => Promise<void>;
   renameConversation: (id: number, title: string) => Promise<void>;
   sendMessage: (text: string, chatIdOverride?: number | null) => Promise<void>;
+  stopGenerating: () => void;
   clearActiveFile: () => void;
   clearPendingImage: (opts?: { silent?: boolean }) => void;
   setPendingImageFromFile: (file: File) => void;
@@ -151,6 +154,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
   const [activeChatId, setActiveChatId] = useState<number | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [isStreamingResponse, setIsStreamingResponse] = useState(false);
   const [selectedAgent, setSelectedAgentState] = useState<AgentMode>("auto");
   const [activeFile, setActiveFile] = useState<ActiveFile | null>(null);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
@@ -161,10 +165,9 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastId = useRef(0);
-
-  const streamingGen = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [composerText, setComposerText] = useState("");
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const isAuthenticated = Boolean(authToken && userId);
 
@@ -180,6 +183,13 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
     setToasts((t) => t.filter((x) => x.id !== id));
   }, []);
 
+  const stopGenerating = useCallback(() => {
+    const controller = streamAbortRef.current;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort();
+    setIsStreamingResponse(false);
+  }, []);
+
   const persistAuth = useCallback((token: string | null, uid: string | null) => {
     setAuthToken(token);
     setUserId(uid);
@@ -190,6 +200,8 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resetAppState = useCallback(() => {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
     setChats([]);
     setActiveChatId(null);
     setMessages([]);
@@ -200,6 +212,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
       return null;
     });
     setComposerText("");
+    setIsStreamingResponse(false);
   }, []);
 
   const logout = useCallback(() => {
@@ -610,6 +623,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
         attachment_url: hasPendingImage ? pending!.previewUrl : null,
         created_at: new Date().toISOString(),
       };
+      const tempAssistantId = `temp-assistant-${Date.now()}`;
 
       try {
         let chatId = chatIdOverride ?? activeChatId;
@@ -642,18 +656,92 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
             request_mode: requestMode,
           };
           if (activeFile) payload.file_id = activeFile.id;
-          data = await api.post<SendMessageResponse>(`/chat/${chatId}/message`, payload, authToken);
+          let streamStarted = false;
+          const abortController = new AbortController();
+          streamAbortRef.current = abortController;
+          setIsStreamingResponse(true);
+          setMessages((m) => [
+            ...m,
+            {
+              id: tempAssistantId,
+              chat_id: chatId!,
+              role: "assistant",
+              content: "",
+              message_type: "text",
+              isStreaming: true,
+              streamPlain: "",
+              created_at: new Date().toISOString(),
+            },
+          ]);
+
+          data = await api.stream<ChatStreamStart, ChatStreamChunk, SendMessageResponse>(
+            `/chat/${chatId}/message/stream`,
+            payload,
+            authToken,
+            {
+              onStart: (start) => {
+                streamStarted = true;
+                setActiveChatId(start.chat_id);
+                setMessages((m) =>
+                  m.map((entry) =>
+                    entry.id === optimistic.id
+                      ? { ...entry, id: start.user_message_id, chat_id: start.chat_id }
+                      : entry
+                  )
+                );
+              },
+              onChunk: ({ delta }) => {
+                setMessages((m) =>
+                  m.map((entry) =>
+                    entry.id === tempAssistantId
+                      ? {
+                          ...entry,
+                          streamPlain: `${entry.streamPlain || ""}${delta}`,
+                        }
+                      : entry
+                  )
+                );
+              },
+              signal: abortController.signal,
+            }
+          ).catch(async (error) => {
+            setMessages((m) =>
+              m
+                .map((entry) => {
+                  if (entry.id !== tempAssistantId) return entry;
+                  const partial = entry.streamPlain || "";
+                  if (error instanceof StreamAbortError) {
+                    if (!partial.trim()) return null;
+                    return {
+                      ...entry,
+                      content: partial,
+                      isStreaming: false,
+                      streamPlain: undefined,
+                      message_metadata: {
+                        ...(entry.message_metadata || {}),
+                        stopped: true,
+                      },
+                    };
+                  }
+                  return null;
+                })
+                .filter((entry): entry is UiMessage => Boolean(entry))
+            );
+            if (streamStarted && !(error instanceof StreamAbortError)) {
+              await refreshChats().catch(() => {});
+            }
+            throw error;
+          });
         }
 
         setActiveChatId(data.chat_id);
-        setMessages((m) => {
-          const next = [...m];
-          const last = next[next.length - 1];
-          if (last && last.id === optimistic.id) {
-            next[next.length - 1] = { ...last, id: data.user_message_id, chat_id: data.chat_id };
-          }
-          return next;
-        });
+        setMessages((m) =>
+          m.map((entry) =>
+            entry.id === optimistic.id
+              ? { ...entry, id: data.user_message_id, chat_id: data.chat_id }
+              : entry
+          )
+        );
 
         const assistantMsg: UiMessage = {
           id: data.assistant_message_id,
@@ -670,48 +758,27 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
 
         if (hasPendingImage) clearPendingImage({ silent: true });
 
-        if (data.message_type === "text") {
-          const streamId = ++streamingGen.current;
-          setMessages((m) => [...m, { ...assistantMsg, isStreaming: true, streamPlain: "", content: "" }]);
-
-          await streamAssistantText(
-            data.reply,
-            (partial) => {
-              if (streamingGen.current !== streamId) return;
-              setMessages((m) => {
-                const next = [...m];
-                const i = next.length - 1;
-                const last = next[i];
-                if (last && last.role === "assistant" && last.id === assistantMsg.id) {
-                  next[i] = { ...last, streamPlain: partial };
-                }
-                return next;
-              });
-            },
-            () => streamingGen.current !== streamId
-          );
-
-          setMessages((m) => {
-            const next = [...m];
-            const i = next.length - 1;
-            const last = next[i];
-            if (last && last.id === assistantMsg.id) {
-              const { streamPlain: _s, isStreaming: _i, ...rest } = last;
-              next[i] = { ...rest, content: data.reply, isStreaming: false };
-            }
-            return next;
-          });
-        } else {
+        if (hasPendingImage) {
           setMessages((m) => [...m, assistantMsg]);
+        } else {
+          setMessages((m) =>
+            m.map((entry) =>
+              entry.id === tempAssistantId
+                ? { ...assistantMsg, isStreaming: false }
+                : entry
+            )
+          );
         }
 
         await refreshChats();
       } catch (e) {
-        streamingGen.current += 1;
-        setMessages((m) => (m[m.length - 1]?.id === optimistic.id ? m.slice(0, -1) : m));
         setComposerText(contentRaw);
-        showToast(e instanceof ApiError ? e.message : "Failed to send message.", "error");
+        if (!(e instanceof StreamAbortError)) {
+          showToast(e instanceof ApiError ? e.message : "Failed to send message.", "error");
+        }
       } finally {
+        streamAbortRef.current = null;
+        setIsStreamingResponse(false);
         setIsSending(false);
       }
     },
@@ -766,6 +833,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
       activeChatId,
       messages,
       isSending,
+      isStreamingResponse,
       selectedAgent,
       setSelectedAgent,
       activeFile,
@@ -775,6 +843,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
       deleteConversation,
       renameConversation,
       sendMessage,
+      stopGenerating,
       clearActiveFile,
       clearPendingImage,
       setPendingImageFromFile,
@@ -823,6 +892,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
       activeChatId,
       messages,
       isSending,
+      isStreamingResponse,
       selectedAgent,
       setSelectedAgent,
       activeFile,
@@ -832,6 +902,7 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
       deleteConversation,
       renameConversation,
       sendMessage,
+      stopGenerating,
       clearActiveFile,
       clearPendingImage,
       setPendingImageFromFile,

@@ -65,3 +65,16 @@ export interface SendMessageResponse {
   attachment_url?: string | null;
   metadata?: Record<string, unknown>;
 }
+
+export interface ChatStreamStart {
+  chat_id: number;
+  user_message_id: number;
+  message_type: MessageType;
+  agent_type?: string | null;
+  provider?: string | null;
+  model?: string | null;
+}
+
+export interface ChatStreamChunk {
+  delta: string;
+}

@@ -199,8 +199,22 @@ export function MessageBubble({
             <div className="whitespace-pre-wrap break-words">{displayContent}</div>
           ) : message.isStreaming ? (
             <div className="whitespace-pre-wrap break-words">
-              {displayContent}
-              <span className="ml-0.5 inline-block h-4 w-1 animate-pulse rounded-sm bg-sky-400 align-middle" />
+              {displayContent ? (
+                <>
+                  {displayContent}
+                  <span className="ml-0.5 inline-block h-4 w-1 animate-pulse rounded-sm bg-sky-400 align-middle" />
+                </>
+              ) : (
+                <span className="inline-flex gap-1 align-middle">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="h-2 w-2 animate-bounce rounded-full bg-sky-400/80"
+                      style={{ animationDelay: `${i * 0.15}s` }}
+                    />
+                  ))}
+                </span>
+              )}
             </div>
           ) : (
             <div

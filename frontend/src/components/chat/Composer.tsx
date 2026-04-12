@@ -9,6 +9,8 @@ export function Composer() {
     setComposerText,
     sendMessage,
     isSending,
+    isStreamingResponse,
+    stopGenerating,
     selectedAgent,
     setSelectedAgent,
     activeFile,
@@ -33,6 +35,18 @@ export function Composer() {
   useEffect(() => {
     resize();
   }, [composerText, resize]);
+
+  useEffect(() => {
+    if (!isStreamingResponse) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        stopGenerating();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isStreamingResponse, stopGenerating]);
 
   const placeholder = (() => {
     if (activeFile) return `Ask about "${activeFile.name}"…`;
@@ -185,24 +199,38 @@ export function Composer() {
             className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent py-2.5 text-sm text-slate-100 outline-none placeholder:text-slate-500 disabled:opacity-50"
             aria-label="Message input"
           />
-          <button
-            type="button"
-            disabled={isSending || (!composerText.trim() && !pendingImage)}
-            onClick={() => void sendMessage(composerText)}
-            title="Send"
-            className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-violet-600 text-slate-950 shadow-glow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {isSending ? (
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-900/40 border-t-slate-900" />
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            )}
-          </button>
+          {isStreamingResponse ? (
+            <button
+              type="button"
+              onClick={stopGenerating}
+              title="Stop generating"
+              className="relative flex h-11 min-w-[8.5rem] shrink-0 items-center justify-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/12 px-4 text-rose-100 shadow-glow-sm transition hover:bg-rose-500/18"
+            >
+              <span className="h-2.5 w-2.5 rounded-sm bg-rose-300" />
+              <span className="text-sm font-medium">Stop</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={isSending || (!composerText.trim() && !pendingImage)}
+              onClick={() => void sendMessage(composerText)}
+              title="Send"
+              className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-violet-600 text-slate-950 shadow-glow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isSending ? (
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-900/40 border-t-slate-900" />
+              ) : (
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                </svg>
+              )}
+            </button>
+          )}
         </div>
-        <p className="px-1 text-center text-[11px] text-slate-500">{hint}</p>
+        <p className="px-1 text-center text-[11px] text-slate-500">
+          {isStreamingResponse ? "Press Esc or click Stop to cancel generation." : hint}
+        </p>
       </div>
     </div>
   );
