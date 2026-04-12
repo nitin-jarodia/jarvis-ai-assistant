@@ -25,6 +25,7 @@ from backend.dependencies import get_current_user
 from backend import crud, schemas
 from backend import ai_service
 from backend import file_service
+from backend import tools as assistant_tools
 from backend.routes.image_routes import router as image_router
 from backend.services import ai_router, image_generation, media_store
 from backend.services import image_analysis_service as image_analysis
@@ -244,6 +245,24 @@ def _sse_event(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
+def _chunk_text_for_stream(text: str, chunk_size: int = 28) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    chunks: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if len(candidate) > chunk_size and current:
+            chunks.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def _prepare_stream_text_reply(
     *,
     db: Session,
@@ -323,15 +342,78 @@ async def _prepare_stream_text_reply(
             *history,
             {"role": "user", "content": content},
         ]
+        base_messages = [
+            {"role": "system", "content": FILE_CHAT_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": f"Document: {file_doc.filename}\n\nContext:\n{context_block}",
+            },
+            *history,
+            {"role": "user", "content": content},
+        ]
+        planning = await asyncio.to_thread(
+            ai_service.complete_with_tools,
+            messages=base_messages,
+            tools=assistant_tools.TOOL_DEFINITIONS,
+            failure_message="I couldn't analyze the document right now. Please try again.",
+        )
+        final_messages = base_messages
+        tool_call_summaries: list[dict] = []
+
+        if planning["tool_calls"]:
+            final_messages = [
+                *base_messages,
+                {
+                    "role": "assistant",
+                    "content": planning["content"] or "",
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call["raw_arguments"],
+                            },
+                        }
+                        for call in planning["tool_calls"]
+                    ],
+                },
+            ]
+            for call in planning["tool_calls"]:
+                result = assistant_tools.execute_tool(
+                    call["name"],
+                    call["arguments"],
+                    assistant_tools.ToolContext(db=db, user_id=user_id),
+                )
+                tool_call_summaries.append(
+                    {
+                        "name": call["name"],
+                        "arguments": call["arguments"],
+                        "result": result,
+                    }
+                )
+                final_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["name"],
+                        "content": result,
+                    }
+                )
+
         return {
             "chat": chat,
             "user_msg": user_msg,
-            "groq_messages": groq_messages,
+            "groq_messages": final_messages,
             "failure_message": "I couldn't analyze the document right now. Please try again.",
             "agent_type": None,
-            "response_metadata": {"document_filename": file_doc.filename},
+            "response_metadata": {
+                "document_filename": file_doc.filename,
+                "tool_calls": tool_call_summaries,
+            },
             "response_model": ai_service.MODEL_NAME,
             "provider_name": "groq",
+            "prefetched_reply": planning["content"] if not planning["tool_calls"] else None,
         }
 
     decision = ai_router.decide_route(
@@ -363,15 +445,69 @@ async def _prepare_stream_text_reply(
         history=history,
         selected_agent=selected_agent,
     )
+    planning = await asyncio.to_thread(
+        ai_service.complete_with_tools,
+        messages=groq_messages,
+        tools=assistant_tools.TOOL_DEFINITIONS,
+        failure_message="I couldn't generate a response right now. Please try again.",
+    )
+    final_messages = groq_messages
+    tool_call_summaries: list[dict] = []
+
+    if planning["tool_calls"]:
+        final_messages = [
+            *groq_messages,
+            {
+                "role": "assistant",
+                "content": planning["content"] or "",
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": call["raw_arguments"],
+                        },
+                    }
+                    for call in planning["tool_calls"]
+                ],
+            },
+        ]
+        for call in planning["tool_calls"]:
+            result = assistant_tools.execute_tool(
+                call["name"],
+                call["arguments"],
+                assistant_tools.ToolContext(db=db, user_id=user_id),
+            )
+            tool_call_summaries.append(
+                {
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                    "result": result,
+                }
+            )
+            final_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": call["name"],
+                    "content": result,
+                }
+            )
+
     return {
         "chat": chat,
         "user_msg": user_msg,
-        "groq_messages": groq_messages,
+        "groq_messages": final_messages,
         "failure_message": "I couldn't generate a response right now. Please try again.",
         "agent_type": agent_type,
-        "response_metadata": {"route_reason": decision.reason},
+        "response_metadata": {
+            "route_reason": decision.reason,
+            "tool_calls": tool_call_summaries,
+        },
         "response_model": ai_service.MODEL_NAME,
         "provider_name": "groq",
+        "prefetched_reply": planning["content"] if not planning["tool_calls"] else None,
     }
 
 
@@ -462,16 +598,60 @@ async def _generate_chat_reply(
             *history,
             {"role": "user", "content": content},
         ]
-        reply = await asyncio.to_thread(
-            ai_service.generateResponse,
-            groq_messages,
-            "I couldn't analyze the document right now. Please try again.",
+        planning = await asyncio.to_thread(
+            ai_service.complete_with_tools,
+            messages=groq_messages,
+            tools=assistant_tools.TOOL_DEFINITIONS,
+            failure_message="I couldn't analyze the document right now. Please try again.",
         )
+        response_metadata = {"document_filename": file_doc.filename, "tool_calls": []}
+        if planning["tool_calls"]:
+            final_messages = [
+                *groq_messages,
+                {
+                    "role": "assistant",
+                    "content": planning["content"] or "",
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call["raw_arguments"],
+                            },
+                        }
+                        for call in planning["tool_calls"]
+                    ],
+                },
+            ]
+            for call in planning["tool_calls"]:
+                result = assistant_tools.execute_tool(
+                    call["name"],
+                    call["arguments"],
+                    assistant_tools.ToolContext(db=db, user_id=user_id),
+                )
+                response_metadata["tool_calls"].append(
+                    {"name": call["name"], "arguments": call["arguments"], "result": result}
+                )
+                final_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["name"],
+                        "content": result,
+                    }
+                )
+            reply = await asyncio.to_thread(
+                ai_service.generateResponse,
+                final_messages,
+                "I couldn't analyze the document right now. Please try again.",
+            )
+        else:
+            reply = planning["content"]
         message_type = MESSAGE_TYPE_TEXT
         provider_name = "groq"
         response_type = MESSAGE_TYPE_TEXT
         response_model = ai_service.MODEL_NAME
-        response_metadata = {"document_filename": file_doc.filename}
         structured_notes = None
         response_image_url = None
         response_attachment_url = None
@@ -498,17 +678,66 @@ async def _generate_chat_reply(
             )
             existing = crud.get_chat_messages(db, chat.id)
             history = _recent_history(existing[:-1], limit=15)
-            agent_type, reply = await asyncio.to_thread(
-                ai_service.generate_agent_response,
+            agent_type, groq_messages = await asyncio.to_thread(
+                ai_service.prepare_agent_messages,
                 user_input=normalized_content,
                 history=history,
                 selected_agent=selected_agent,
             )
+            planning = await asyncio.to_thread(
+                ai_service.complete_with_tools,
+                messages=groq_messages,
+                tools=assistant_tools.TOOL_DEFINITIONS,
+                failure_message="I couldn't generate a response right now. Please try again.",
+            )
+            response_metadata = {"route_reason": decision.reason, "tool_calls": []}
+            if planning["tool_calls"]:
+                final_messages = [
+                    *groq_messages,
+                    {
+                        "role": "assistant",
+                        "content": planning["content"] or "",
+                        "tool_calls": [
+                            {
+                                "id": call["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": call["name"],
+                                    "arguments": call["raw_arguments"],
+                                },
+                            }
+                            for call in planning["tool_calls"]
+                        ],
+                    },
+                ]
+                for call in planning["tool_calls"]:
+                    result = assistant_tools.execute_tool(
+                        call["name"],
+                        call["arguments"],
+                        assistant_tools.ToolContext(db=db, user_id=user_id),
+                    )
+                    response_metadata["tool_calls"].append(
+                        {"name": call["name"], "arguments": call["arguments"], "result": result}
+                    )
+                    final_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "name": call["name"],
+                            "content": result,
+                        }
+                    )
+                reply = await asyncio.to_thread(
+                    ai_service.generateResponse,
+                    final_messages,
+                    "I couldn't generate a response right now. Please try again.",
+                )
+            else:
+                reply = planning["content"]
             message_type = MESSAGE_TYPE_TEXT
             provider_name = "groq"
             response_type = MESSAGE_TYPE_TEXT
             response_model = ai_service.MODEL_NAME
-            response_metadata = {"route_reason": decision.reason}
             structured_notes = None
             response_image_url = None
             response_attachment_url = None
@@ -785,27 +1014,36 @@ async def stream_chat_message(
                 "agent_type": stream_context["agent_type"],
                 "provider": stream_context["provider_name"],
                 "model": stream_context["response_model"],
+                "tool_calls": stream_context["response_metadata"].get("tool_calls", []),
             },
         )
 
-        producer_thread = threading.Thread(target=producer, daemon=True)
-        producer_thread.start()
-
         try:
-            while True:
-                kind, payload_text = await queue.get()
-                if await request.is_disconnected():
-                    client_disconnected = True
-                    stop_event.set()
-                    break
-                if kind == "chunk" and payload_text:
-                    yield _sse_event("chunk", {"delta": payload_text})
+            if stream_context.get("prefetched_reply"):
+                for delta in _chunk_text_for_stream(stream_context["prefetched_reply"]):
+                    if await request.is_disconnected():
+                        client_disconnected = True
+                        break
+                    parts.append(delta)
+                    yield _sse_event("chunk", {"delta": f"{delta} "})
+                    await asyncio.sleep(0.015)
+            else:
+                producer_thread = threading.Thread(target=producer, daemon=True)
+                producer_thread.start()
+                while True:
+                    kind, payload_text = await queue.get()
                     if await request.is_disconnected():
                         client_disconnected = True
                         stop_event.set()
                         break
-                    continue
-                break
+                    if kind == "chunk" and payload_text:
+                        yield _sse_event("chunk", {"delta": payload_text})
+                        if await request.is_disconnected():
+                            client_disconnected = True
+                            stop_event.set()
+                            break
+                        continue
+                    break
         except asyncio.CancelledError:
             client_disconnected = True
             stop_event.set()

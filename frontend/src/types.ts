@@ -73,6 +73,11 @@ export interface ChatStreamStart {
   agent_type?: string | null;
   provider?: string | null;
   model?: string | null;
+  tool_calls?: Array<{
+    name: string;
+    arguments?: Record<string, unknown>;
+    result?: string;
+  }>;
 }
 
 export interface ChatStreamChunk {

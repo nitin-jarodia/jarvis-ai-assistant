@@ -116,6 +116,9 @@ export function MessageBubble({
           label: message.agent_type,
         }
       : null;
+  const toolCalls = Array.isArray(message.message_metadata?.tool_calls)
+    ? message.message_metadata.tool_calls
+    : [];
 
   return (
     <div
@@ -139,6 +142,11 @@ export function MessageBubble({
           {agent && (
             <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[10px] font-semibold text-slate-300">
               {agent.icon} {agent.label}
+            </span>
+          )}
+          {!isUser && toolCalls.length > 0 && (
+            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
+              Tool: {String(toolCalls[0]?.name || "used")}
             </span>
           )}
           <span>{formatMessageTime(message.created_at)}</span>
@@ -205,14 +213,19 @@ export function MessageBubble({
                   <span className="ml-0.5 inline-block h-4 w-1 animate-pulse rounded-sm bg-sky-400 align-middle" />
                 </>
               ) : (
-                <span className="inline-flex gap-1 align-middle">
-                  {[0, 1, 2].map((i) => (
-                    <span
-                      key={i}
-                      className="h-2 w-2 animate-bounce rounded-full bg-sky-400/80"
-                      style={{ animationDelay: `${i * 0.15}s` }}
-                    />
-                  ))}
+                <span className="inline-flex items-center gap-2 align-middle text-slate-400">
+                  {toolCalls.length > 0 ? (
+                    <span className="text-sm">Using {String(toolCalls[0]?.name || "tool")}...</span>
+                  ) : null}
+                  <span className="inline-flex gap-1">
+                    {[0, 1, 2].map((i) => (
+                      <span
+                        key={i}
+                        className="h-2 w-2 animate-bounce rounded-full bg-sky-400/80"
+                        style={{ animationDelay: `${i * 0.15}s` }}
+                      />
+                    ))}
+                  </span>
                 </span>
               )}
             </div>

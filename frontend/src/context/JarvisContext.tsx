@@ -686,7 +686,15 @@ export function JarvisProvider({ children }: { children: ReactNode }) {
                   m.map((entry) =>
                     entry.id === optimistic.id
                       ? { ...entry, id: start.user_message_id, chat_id: start.chat_id }
-                      : entry
+                      : entry.id === tempAssistantId
+                        ? {
+                            ...entry,
+                            message_metadata: {
+                              ...(entry.message_metadata || {}),
+                              tool_calls: start.tool_calls || [],
+                            },
+                          }
+                        : entry
                   )
                 );
               },

@@ -11,6 +11,8 @@ import re
 import time
 from collections.abc import Iterator
 from threading import Event
+from typing import Any
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -91,8 +93,20 @@ def _ensure_client() -> Groq | None:
     return _client
 
 
+def _coerce_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(str(item.get("text", "")))
+        return " ".join(part.strip() for part in text_parts if part).strip()
+    return str(content or "").strip()
+
+
 def generate_response_from_messages(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     failure_message: str | None = None,
     *,
     max_tokens: int = 2048,
@@ -114,7 +128,7 @@ def generate_response_from_messages(
             max_tokens=max_tokens,
         )
 
-        reply = (response.choices[0].message.content or "").strip()
+        reply = _coerce_message_content(response.choices[0].message.content)
         elapsed = time.time() - start_time
         logger.info(
             "Groq response | model=%s | tokens=%s | time=%.2fs",
@@ -162,7 +176,7 @@ def generate_response_from_messages(
 
 
 def stream_response_from_messages(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     failure_message: str | None = None,
     *,
     max_tokens: int = 2048,
@@ -264,7 +278,7 @@ def stream_response_from_messages(
 
 
 def generateResponse(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     failure_message: str | None = None,
     *,
     max_tokens: int = 2048,
@@ -334,7 +348,7 @@ def build_agent_system_prompt(agent_type: str) -> str:
 def prepare_agent_messages(
     *,
     user_input: str,
-    history: list[dict[str, str]] | None = None,
+    history: list[dict[str, Any]] | None = None,
     selected_agent: str = "auto",
 ) -> tuple[str, list[dict[str, str]]]:
     """Resolve the active agent and return the final Groq message list."""
@@ -349,6 +363,67 @@ def prepare_agent_messages(
         messages.extend(history)
     messages.append({"role": "user", "content": user_input})
     return agent_type, messages
+
+
+def complete_with_tools(
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    failure_message: str | None = None,
+    max_tokens: int = 1024,
+    temperature: float = 0.2,
+) -> dict[str, Any]:
+    """Run a non-streaming planning call that may return tool calls."""
+    client = _ensure_client()
+    if client is None:
+        fallback = failure_message or "Jarvis is not configured. Please set the GROQ_API_KEY in your .env file."
+        return {"content": fallback, "tool_calls": []}
+
+    start_time = time.time()
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        message = response.choices[0].message
+        tool_calls: list[dict[str, Any]] = []
+        for call in getattr(message, "tool_calls", None) or []:
+            raw_arguments = call.function.arguments or "{}"
+            try:
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    arguments = {}
+            except json.JSONDecodeError:
+                arguments = {}
+            tool_calls.append(
+                {
+                    "id": call.id,
+                    "name": call.function.name,
+                    "arguments": arguments,
+                    "raw_arguments": raw_arguments,
+                }
+            )
+
+        logger.info(
+            "Groq tool planning | model=%s | tool_calls=%d | time=%.2fs",
+            MODEL_NAME,
+            len(tool_calls),
+            time.time() - start_time,
+        )
+        return {
+            "content": _coerce_message_content(message.content),
+            "tool_calls": tool_calls,
+        }
+    except Exception as exc:
+        logger.error("Tool planning call failed: %s", exc)
+        return {
+            "content": failure_message or "I couldn't complete that request right now. Please try again.",
+            "tool_calls": [],
+        }
 
 
 def generate_agent_response(
